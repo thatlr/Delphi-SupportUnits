@@ -1,4 +1,4 @@
-# Delphi-MemorySupport
+# Delphi-SupportUnits
 Various units to deal with memory allocation
 
 ## ReserveLow2GB
