@@ -1,5 +1,5 @@
 # Delphi-SupportUnits
-Various units to deal with memory allocation and general issues
+Various units to deal with memory allocation and general issues.
 
 
 General note:
@@ -13,25 +13,27 @@ This can be used to test for inappropriate pointer usage, caused by casting a po
 will be negative which could result in wrong arithmetics or comparisions.
 
 Including this unit forces all newly allocated memory to appear above the 2 GB virtual address. This applies to:
-  - newly allocated heap memory (GetMem, CoTaskMemAlloc, SysAllocString, malloc, ...),
+  - newly allocated heap memory (GetMem, CoTaskMemAlloc, SysAllocString, HeapAlloc, GlobalAlloc, malloc, ...),
   - stack segments of new threads,
   - data segments assigned to new memory mappings,
   - code segements of newly loaded DLLs.
 
-This is not only affecting Delphi code, but *all* other parts of the process also (e.g. COM-allcated memory, memory allocated
-by Windows components or by third-party DLLs).
+This is not only affecting Delphi code, but *all* other parts of the process also (e.g. memory allocated by Windows components or by
+third-party code of any kind).
 
 This unit does not depend on a specific Delphi memory manager and is therefore compatible with everyone.
 
 
 ## MemTest
 
-This unit can be integrated into programs to verify correct management of heap memory. From the point of view of the program,
+This unit can be integrated into Delphi programs to verify correct management of heap memory. From the point of view of the program,
 only the speed is adversely affected and more memory is used.
 
 It provides checks for Delphi and COM memory allocations (detection of double-free and of corruption by writing past the end of
 allocated blocks).
 For Delphi memory, it also detects memory leaks and reports them at program exit.
+
+Example:
 
 ```
 var
@@ -75,7 +77,7 @@ begin
 end.
 ```
 
-The call to CoTaskMemFree will generate a Debugger break (if running under a debugger) and displays this line the Event Log window:
+The call to CoTaskMemFree will generate a Debugger break (if running under a debugger) and displays this line the Event Log window of the IDE:
 ```
 Debug output: *** COM Memory: Memory corruption detected: p=$000000008000ef60 Prozess Test.exe (7548)
 ```
@@ -95,7 +97,7 @@ Addr=000000008000ef60  Size=49  PreKey=$fefefefefefefefe  PostKey=$efefefefefefe
 Simple replacement for the built-in Delphi memory manager, by using the Windows Heap.
 
 (I care for thread-safety and low fragmentation, but not so much for ultimate performance. As the Windows heap is used by most
-Visual C/C++ programs through the standard malloc implementation, it should be fine for this requirements.)
+Visual C/C++ programs through the standard malloc implementation in msvcrt.dll, it should be fine for this requirements.)
 
 
 ## CorrectLocale
@@ -103,6 +105,8 @@ Visual C/C++ programs through the standard malloc implementation, it should be f
 Workaround for a Windows 7 bug. Its usage is mandatory to force SysUtils.InitSysLocale to always get a correct value from
 GetThreadLocale() when initializing its regional settings.
 
+
+## Summing it up:
 
 My programs include the following sequence of units in the respective .dpr files:
 ```
@@ -122,5 +126,5 @@ uses
 {$SetPeFlags IMAGE_FILE_LARGE_ADDRESS_AWARE}
 ```
 
-ReserveLow2GB is only included very seldom during specific testing, as I did not had much old code that did pointer arithmetics
-by casting them to "integer" or "cardinal". The "PByte" pointer type is much more suitable for this.
+ReserveLow2GB is only included very seldom during specific testing, since I had very little old code that did pointer arithmetics
+by casting to plain "integer". The "PByte" pointer type is much more suitable for this.
