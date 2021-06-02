@@ -21,6 +21,13 @@ This unit does not depend on a specific Delphi memory manager and is therefore c
 This unit can be integrated into programs to verify correct memory management. From the point of view of the program,
 only the speed is adversely affected and more memory is used.
 
-It provides checks for Delphi and COM memory allocations (detecting of double-free and of corruption by writing past the end of
-the allocated block).
-For Delphi memory, it also detects memory leaks.
+It provides checks for Delphi and COM memory allocations (detection of double-free and of corruption by writing past the end of
+allocated blocks).
+For Delphi memory, it also detects memory leaks and reports them at program exit.
+
+## WinMemMgr
+
+Simple replacement for the built-in Delphi memory manager, by using the Windows Heap.
+
+(I care for thread-safety and low fragmentation, but not so much for ultimate performance. As the Windows heap is used by most
+Visual C/C++ programs through the standard malloc implementation, it should be fine for this requirements.)
