@@ -46,7 +46,7 @@ begin
 end.
 ```
 
-will generate this report in the file "memdump.txt":
+will generate this report in the file "memdump_allocated_blocks.txt":
 
 ```
 *** Delphi Memory: 70 byte in 3 blocks
