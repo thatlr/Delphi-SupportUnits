@@ -31,3 +31,9 @@ Simple replacement for the built-in Delphi memory manager, by using the Windows 
 
 (I care for thread-safety and low fragmentation, but not so much for ultimate performance. As the Windows heap is used by most
 Visual C/C++ programs through the standard malloc implementation, it should be fine for this requirements.)
+
+
+## CorrectLocale
+
+Workaround for a Windows 7 bug. Its usage is mandatory to force SysUtils.InitSysLocale to always get a correct value from
+GetThreadLocale() when initializing its regional settings.
