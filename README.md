@@ -9,8 +9,8 @@ the issues addressed here, please continue to go your own way.
 
 ## ReserveLow2GB
 
-This can be used to test for inappropriate pointer usage, caused by casting a pointer to a (signed) 32bit integer. Such value
-will be negative which could result in wrong arithmetics or comparisions.
+This can be used to test for inappropriate pointer usage, caused by casting a pointer to a (signed) 32bit integer. A pointer above 2GB
+has a negative integer value which could result in wrong arithmetics or comparisions.
 
 Including this unit forces all newly allocated memory to appear above the 2 GB virtual address. This applies to:
   - newly allocated heap memory (GetMem, CoTaskMemAlloc, SysAllocString, HeapAlloc, GlobalAlloc, malloc, ...),
