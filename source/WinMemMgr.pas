@@ -1,7 +1,7 @@
 unit WinMemMgr;
 
 {
-  Replacement for the built-in Memory Manager, as this tends to fragmentation (at least before D2009).
+  Replacement for the built-in Memory Manager, as it tends to fragment (at least before D2009 / FastMM).
 
   Note:
 

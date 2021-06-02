@@ -232,7 +232,7 @@ end;
  //===================================================================================================================
 procedure WriteHexDump(hFile: THandle; buf: pointer; bufsize: _NativeUInt);
 const
-  LLen = 16;	// Anzahl Pufferbytes pro Zeile
+  LLen = 16;	// bytes per dump line
 var
   offset: _NativeUInt;
   hidx: integer;
@@ -325,9 +325,9 @@ type
   end;
 
 const
-  PreMemKey  = {$ifdef Win64} _NativeUInt($FEFEFEFEFEFEFEFE) {$else} _NativeUInt($FEFEFEFE) {$endif};
-  PostMemKey = {$ifdef Win64} _NativeUInt($EFEFEFEFEFEFEFEF) {$else} _NativeUInt($EFEFEFEF) {$endif};
-  RootKey    = {$ifdef Win64} _NativeUInt($AA5555AAAA5555AA) {$else} _NativeUInt($AA5555AA) {$endif};
+  PreMemKey  = {$ifdef CPU64BITS} _NativeUInt($FEFEFEFEFEFEFEFE) {$else} _NativeUInt($FEFEFEFE) {$endif};
+  PostMemKey = {$ifdef CPU64BITS} _NativeUInt($EFEFEFEFEFEFEFEF) {$else} _NativeUInt($EFEFEFEF) {$endif};
+  RootKey    = {$ifdef CPU64BITS} _NativeUInt($AA5555AAAA5555AA) {$else} _NativeUInt($AA5555AA) {$endif};
 
 
 var

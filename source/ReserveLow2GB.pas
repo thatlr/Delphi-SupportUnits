@@ -22,7 +22,7 @@ unit ReserveLow2GB;
   memory is exhausted right away, resulting in Runtime Error 203.
 
   Using this memory reservation results in a larger Page Table in the process, but it does not increase the committed
-  memory significantly nor does it worsen  the runtime performance.
+  memory significantly nor does it worsen the runtime performance.
   There is no point in using it in a 64-bit process, but it is harmless (besides the additional Page Table allocation).
 
   Use VMMap to monitor the allocations of your process (https://docs.microsoft.com/en-us/sysinternals/downloads/vmmap).
