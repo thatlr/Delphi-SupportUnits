@@ -1,5 +1,5 @@
 # Delphi-SupportUnits
-Various units to deal with memory allocation and general issues
+Various units to deal with memory allocation and general issues.
 
 
 General note:
