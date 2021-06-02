@@ -1,6 +1,12 @@
 # Delphi-SupportUnits
 Various units to deal with memory allocation and general issues
 
+
+General note:
+I do believe that someone could benefit from the publication of this helper units, but if you have other or better solutions, or don't see
+the issues addressed here, please continue to go your own way.
+
+
 ## ReserveLow2GB
 
 This can be used to test for inappropriate pointer usage, caused by casting a pointer to a (signed) 32bit integer. Such value
@@ -37,3 +43,12 @@ Visual C/C++ programs through the standard malloc implementation, it should be f
 
 Workaround for a Windows 7 bug. Its usage is mandatory to force SysUtils.InitSysLocale to always get a correct value from
 GetThreadLocale() when initializing its regional settings.
+
+
+My programs include the following sequence of units in the respective .dpr files:
+
+uses
+  WinMemMgr,
+  MemTest,
+  CorrectLocale,
+  ....
