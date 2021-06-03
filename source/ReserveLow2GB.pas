@@ -50,13 +50,21 @@ const
 
 
  //===================================================================================================================
+ //===================================================================================================================
+procedure MyAssert(Cond: boolean); inline;
+begin
+  Assert(Cond);
+end;
+
+
+ //===================================================================================================================
  // Enlarges the reservation of the region <Addr> to the maximum possible size.
  //===================================================================================================================
 function GrowReservedBlock(Addr: PByte; Size: NativeUInt): PByte;
 begin
   // find the longest possible reservation starting from <Addr>:
   repeat
-	Assert(Windows.VirtualFree(Addr, 0, MEM_RELEASE));
+	MyAssert(Windows.VirtualFree(Addr, 0, MEM_RELEASE));
 	inc(Size, StepSize);
   until (NativeUInt(Addr) + Size > Limit2GB) or (Windows.VirtualAlloc(Addr, Size, MEM_RESERVE, PAGE_NOACCESS) = nil);
   // finalize the possible reservation:
