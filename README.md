@@ -9,8 +9,8 @@ the issues addressed here, please continue to go your own way.
 
 ## ReserveLow2GB
 
-This can be used to test for inappropriate pointer usage, caused by casting a pointer to a (signed) 32bit integer. Such value
-will be negative which could result in wrong arithmetics or comparisions.
+This can be used to test for inappropriate pointer usage, caused by casting a pointer to a (signed) 32bit integer. A pointer above 2GB
+has a negative integer value which could result in wrong arithmetics or comparisions.
 
 Including this unit forces all newly allocated memory to appear above the 2 GB virtual address. This applies to:
   - newly allocated heap memory (GetMem, CoTaskMemAlloc, SysAllocString, HeapAlloc, GlobalAlloc, malloc, ...),
@@ -26,11 +26,11 @@ This unit does not depend on a specific Delphi memory manager and is therefore c
 
 ## MemTest
 
-This unit can be integrated into Delphi programs to verify correct management of heap memory. From the point of view of the program,
+This unit can be used by Delphi programs to verify correct management of heap memory. From the point of view of the program,
 only the speed is adversely affected and more memory is used.
 
-It provides checks for Delphi and COM memory allocations (detection of double-free and of corruption by writing past the end of
-allocated blocks).
+It provides checks for Delphi and COM memory allocations (detection of double-free and of corruption by writing before the start or
+past the end of allocated blocks).
 For Delphi memory, it also detects memory leaks and reports them at program exit.
 
 Example:
