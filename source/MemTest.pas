@@ -1148,7 +1148,7 @@ begin
   Result := true;
 end;
 
-procedure DumpMemList(const Filename: string);
+procedure DumpAllocatedBlocks(const Filename: string);
 begin
   // nothing
 end;
