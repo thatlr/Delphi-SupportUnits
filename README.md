@@ -29,8 +29,8 @@ This unit does not depend on a specific Delphi memory manager and is therefore c
 This unit can be used by Delphi programs to verify correct management of heap memory. From the point of view of the program,
 only the speed is adversely affected and more memory is used.
 
-It provides checks for Delphi and COM memory allocations (detection of double-free and of corruption by writing before the start or
-past the end of allocated blocks).
+It provides checks for Delphi and COM memory allocations: Detection of double-free and of corruption by writing before the start or
+past the end of allocated blocks.
 For Delphi memory, it also detects memory leaks and reports them at program exit.
 
 Example:
@@ -66,7 +66,7 @@ Addr: 000000008000ef10  Size: 18  Type: AnsiString
   000000008000ef20 61 00                                            a.              
 ```
 
-Aother example:
+Another example:
 ```
 var
   p: PByte;
@@ -77,7 +77,7 @@ begin
 end.
 ```
 
-The call to CoTaskMemFree will generate a Debugger break (if running under a debugger) and displays this line the Event Log window of the IDE:
+The call to CoTaskMemFree will generate a Debugger break (if running under a debugger) and displays this line in the Event Log window of the IDE:
 ```
 Debug output: *** COM Memory: Memory corruption detected: p=$000000008000ef60 Prozess Test.exe (7548)
 ```
