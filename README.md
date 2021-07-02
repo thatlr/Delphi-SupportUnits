@@ -101,9 +101,10 @@ called by System.pas as the very last step. If you wait long enough, until all t
 no Access Violation happens. The stack trace of all the involved Windows components seems to indicate that the fault happens as part of the
 combase.dll COM sutddown operations, when the IMallocSpy interface was used at some point before. And it happens even when the
 IMallocSpy implementation is purely passing through all operations.
-As this all is pure Windows functionality, nothing can be done to mitigate it. Just make sure you ship in Release mode, that is,
-with a disabled MemTest, as otherwise, this Access Violation is silently recorded by Windows Error Reporting and creates Event Log entries.
-
+As this all is pure Windows functionality, there is no direct way to mitigate it. To prevent this AV from popping up regularly, the MemTest shutdown now calls
+TerminateProcess, instead of letting System.pas to continue with ExitProcess. This is the very last operation of the Delphi app anyway,
+every execution thereafter is caused by DLL unloading and cleanup, is not controlled by Delphi, and can therefore be skipped safely
+in almost all cases.
 
 ## WinMemMgr
 
