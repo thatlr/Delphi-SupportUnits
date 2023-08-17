@@ -101,9 +101,8 @@ end;
 
 
  //=============================================================================
- // Is executed instead of the orignal GlobalAddAtomW() function, to correct the problematic atom names.
- // For example: Changes the dynamically generated atom name 'ControlOfs00B2000000004DB8' by assigning the parameter
- // <lpString> a reference to the static string 'ControlOfs!'.
+ // Is executed instead of the orignal GlobalAddAtom() function, and corrects the problematic atom names.
+ // For example, the atom name 'ControlOfs00B2000000004DB8' is changed to 'ControlOfs0000000000000000'.
  //=============================================================================
 class function TCallHook.HookedGlobalAddAtom(lpString: PChar): ATOM; stdcall;
 const
@@ -117,7 +116,7 @@ const
 
   // Dialogs.InitGlobals (line 6480)
   Name3: array [0..9] of Char = 'WndProcPtr';
-  Name3Len = System.Length(Name2);
+  Name3Len = System.Length(Name3);
 asm
   PUSH EAX
   PUSH EDX
@@ -155,7 +154,7 @@ end;
 
 
  //=============================================================================
- // Enables interception of GlobalAddAtomW calls.
+ // Enables interception of GlobalAddAtom calls.
  //=============================================================================
 class procedure TCallHook.HookGlobalAddAtom;
 type
@@ -188,7 +187,7 @@ end;
 
 
  //=============================================================================
- // Disables interception of GlobalAddAtomW calls.
+ // Disables interception of GlobalAddAtom calls.
  //=============================================================================
 class procedure TCallHook.UnhookGlobalAddAtom;
 begin
