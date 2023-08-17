@@ -122,6 +122,14 @@ Workaround for a Windows 7 bug. Its usage is mandatory to force SysUtils.InitSys
 GetThreadLocale() when initializing its regional settings.
 
 
+## FixAtomLeak
+
+Workaround for the famous RegisterWindowMessage & Atom leak: https://cc.embarcadero.com/Item/28963 The RegisterWindowMessage get
+fixed in Delphi XE2, but the global atoms will still leak when the program termnates abnormally.
+This solution intercepts GlobalAddAtomW() and patches the three Delphi strings passed to this call to contain static content,
+thereby fixing the atom leak and also the RegisterWindowMessage leak.
+
+
 ## Summing it up:
 
 My programs include the following sequence of units in the respective .dpr files:
@@ -140,6 +148,20 @@ uses
    
 // IMAGE_FILE_LARGE_ADDRESS_AWARE: may use heap/code above 2GB
 {$SetPeFlags IMAGE_FILE_LARGE_ADDRESS_AWARE}
+```
+
+For GUI programs in Delphi 2009, "FixAtomLeak" and "VCLFixPack" (https://www.idefixpack.de/blog/bugfix-units/vclfixpack-10/)
+are also included, in this order:
+
+```
+uses
+  WinMemMgr,
+  MemTest,
+  CorrectLocale,
+  FixAtomLeak,
+  VCLFixPack,
+  Windows,
+  ....
 ```
 
 ReserveLow2GB is only included very seldom during specific testing, since I had very little old code that did pointer arithmetics
