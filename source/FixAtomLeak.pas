@@ -11,7 +11,7 @@ unit FixAtomLeak;
   login session forever.
 
   As the VCL checks beforehand if a window belongs to the own process, it should use *local* atoms (beside of that, it
-  is a conceptual error to use dynamically generated atom names). Or no uses atoms at all: Stringified GUIDs and even
+  is a conceptual error to use dynamically generated atom names). Or not use atoms at all: Stringified GUIDs and even
   constant names would do the job.
 
 
@@ -40,15 +40,12 @@ interface
 implementation
 {############################################################################}
 
-{$if not defined(D2009)}
 
-  {$message error 'FixAtomLeak: needs Delphi 2009 due to Unicode'}
+// issue exists from Delphi6 to Delphi XE
 
-{$elseif not defined(DelphiXE2)}
+{$if defined(Delphi6) and not defined(DelphiXE2)}
 
   {$if sizeof(pointer) = 8} {$message error 'FixAtomLeak: only for 32bit'} {$ifend}
-
-// should be fixed in Delphi XE2
 
 uses Windows;
 
@@ -59,7 +56,6 @@ type
   const
 	FCurrentProcess = THandle(-1);
   type
-	PBackupBuffer = ^TBackupBuffer;
 	TBackupBuffer = array [0..4] of byte;
 	TJmpCode = packed record
 	  JmpCode: byte;
@@ -70,8 +66,8 @@ type
 	FContAddr: PByte;
 	FBackupBuffer: TBackupBuffer;
 
-	class function StartsWith(p1, p2: PWideChar; Len2: uint32): boolean; static;
-	class function HookedGlobalAddAtom(lpString: PWideChar): ATOM; stdcall; static;
+	class function StartsWith(p1, p2: PChar; Len2: uint32): boolean; static;
+	class function HookedGlobalAddAtom(lpString: PChar): ATOM; stdcall; static;
   public
 	class procedure HookGlobalAddAtom; static;
 	class procedure UnhookGlobalAddAtom; static;
@@ -84,7 +80,7 @@ type
  // p1: null-terminated string
  // p2: must not contain a null character within <Len2>
  //=============================================================================
-class function TCallHook.StartsWith(p1, p2: PWideChar; Len2: uint32): boolean;
+class function TCallHook.StartsWith(p1, p2: PChar; Len2: uint32): boolean;
 begin
   repeat
 	if p1^ <> p2^ then exit(false);
@@ -109,18 +105,18 @@ end;
  // For example: Changes the dynamically generated atom name 'ControlOfs00B2000000004DB8' by assigning the parameter
  // <lpString> a reference to the static string 'ControlOfs!'.
  //=============================================================================
-class function TCallHook.HookedGlobalAddAtom(lpString: PWideChar): ATOM; stdcall;
+class function TCallHook.HookedGlobalAddAtom(lpString: PChar): ATOM; stdcall;
 const
   // Controls.InitControls (line 15124)
-  Name1: array [0..5] of WideChar = 'Delphi';
+  Name1: array [0..5] of Char = 'Delphi';
   Name1Len = System.Length(Name1);
 
   // Controls.InitControls (line 15126)
-  Name2: array [0..9] of WideChar = 'ControlOfs';
+  Name2: array [0..9] of Char = 'ControlOfs';
   Name2Len = System.Length(Name2);
 
   // Dialogs.InitGlobals (line 6480)
-  Name3: array [0..9] of WideChar = 'WndProcPtr';
+  Name3: array [0..9] of Char = 'WndProcPtr';
   Name3Len = System.Length(Name2);
 asm
   PUSH EAX
@@ -162,6 +158,8 @@ end;
  // Enables interception of GlobalAddAtomW calls.
  //=============================================================================
 class procedure TCallHook.HookGlobalAddAtom;
+type
+  PBackupBuffer = ^TBackupBuffer;
 var
   p: PByte;
   Buffer: TJmpCode;
@@ -169,7 +167,7 @@ begin
   FhInst := Windows.LoadLibrary(Windows.kernel32);
   Assert(FhInst <> 0);
 
-  p := Windows.GetProcAddress(FhInst, 'GlobalAddAtomW');
+  p := Windows.GetProcAddress(FhInst, {$ifdef UNICODE}'GlobalAddAtomW'{$else}'GlobalAddAtomA'{$endif});
   Assert(p <> nil);
 
   // save the starting 5 bytes:
@@ -182,7 +180,7 @@ begin
   // https://www.felixcloutier.com/x86/jmp
   FContAddr := p + sizeof(TJmpCode);
   Buffer.JmpCode := $E9;
-  Buffer.JmpOffset := PByte(@HookedGlobalAddAtom) - p - sizeof(TJmpCode);
+  Buffer.JmpOffset := PByte(@HookedGlobalAddAtom) - FContAddr;
 
   // https://devblogs.microsoft.com/oldnewthing/20181206-00/?p=100415
   Windows.WriteProcessMemory(FCurrentProcess, p, @Buffer, sizeof(Buffer), PDWORD(nil)^);

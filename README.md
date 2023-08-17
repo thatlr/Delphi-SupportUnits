@@ -124,8 +124,8 @@ GetThreadLocale() when initializing its regional settings.
 
 ## FixAtomLeak
 
-Workaround for the famous RegisterWindowMessage & Atom leak: https://cc.embarcadero.com/Item/28963 The RegisterWindowMessage get
-fixed in Delphi XE2, but the global atoms will still leak when the program termnates abnormally.
+Workaround for the famous RegisterWindowMessage & Atom leak: https://cc.embarcadero.com/Item/28963 The RegisterWindowMessage leak get
+fixed in Delphi XE2, but the global atoms will still leak when the program terminates abnormally.
 This solution intercepts GlobalAddAtomW() and patches the three Delphi strings passed to this call to contain static content,
 thereby fixing the atom leak and also the RegisterWindowMessage leak.
 
