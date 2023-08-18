@@ -1,10 +1,10 @@
 unit FixAtomLeak;
 
 {
-  Fix for leakage of Atoms and RegisterWindowsMessage registrations due to the VCL using global atoms in
+  Fix for leakage of Atoms and RegisterWindowMessage registrations due to the VCL using global atoms in
   Dialogs.pas (InitGlobals) and Controls.pas (InitControls) and uses dynamically generated names for them.
 
-  The RegisterWindowsMessage registrations will stay in the login session forever, which is bad for services
+  The RegisterWindowMessage registrations will stay in the login session forever, which is bad for services
   since the login session used by Windows services persists until the machine is rebooted.
 
   If the process does not exit normally (crash, killed, ExitProcess), the global atoms also will stay in the
@@ -13,6 +13,8 @@ unit FixAtomLeak;
   As the VCL checks beforehand if a window belongs to the own process, it should use *local* atoms (beside of that, it
   is a conceptual error to use dynamically generated atom names). Or not use atoms at all: Stringified GUIDs and even
   constant names would do the job.
+
+  Supports 32 and 64 bit.
 
 
   When needed:
@@ -23,6 +25,13 @@ unit FixAtomLeak;
   How to use:
 
   Include it in the .dpr file, before any unit that references "Controls" or "Dialogs", i.e. before "VCLFixPack".
+
+
+  How it works:
+
+  It intercepts all calls to GlobalAddAtom() from the actual assembly (EXE or DLL) and modifies the content of the
+  problematic strings. This only affects Delphi code inside the same assembly (EXE or DLL). No other assembly of the
+  process is affected, as also no calls through GetProcAddr.
 
 
   https://learn.microsoft.com/en-us/windows/win32/dataxchg/about-atom-tables
@@ -41,14 +50,12 @@ implementation
 {############################################################################}
 
 
-// issue exists from Delphi6 to Delphi XE
+// Issue with RegisterWindowMessage exists from Delphi6 to Delphi XE, but the atom leak for abnormal terminated
+// processes even exists in Delphi 11.3 (Vcl.Controls.pas, line 17005 and 17007).
 
-{$if defined(Delphi6) and not defined(DelphiXE2)}
-
-  {$if sizeof(pointer) = 8} {$message error 'FixAtomLeak: only for 32bit'} {$ifend}
+{$if defined(Delphi6)}
 
 uses Windows;
-
 
 type
   TCallHook = record
@@ -56,45 +63,44 @@ type
   const
 	FCurrentProcess = THandle(-1);
   type
-	TBackupBuffer = array [0..4] of byte;
-	TJmpCode = packed record
-	  JmpCode: byte;
-	  JmpOffset: int32;
+	PTrampoline = ^TTrampoline;
+	TTrampoline = packed record
+	  OpCode: word;
+	  {$ifdef CPU64Bits}
+	  RelativeIndirectAddr: int32;
+	  {$else}
+	  IndirectAddr: PPointer;
+	  {$endif}
 	end;
+	TFunc = function (lpString: PChar): ATOM; stdcall;
   class var
-	FhInst: HMODULE;
-	FContAddr: PByte;
-	FBackupBuffer: TBackupBuffer;
-
-	class function StartsWith(p1, p2: PChar; Len2: uint32): boolean; static;
+	FFuncPtr: pointer;
+	class function CheckString(p1, p2: PChar): boolean; static;
 	class function HookedGlobalAddAtom(lpString: PChar): ATOM; stdcall; static;
   public
 	class procedure HookGlobalAddAtom; static;
-	class procedure UnhookGlobalAddAtom; static;
+	//class procedure UnhookGlobalAddAtom; static;
   end;
 
 
  //=============================================================================
- // Returns true if <p1> matches <p2> in the first <Len2> characters. In that case, the reminder
- // of the <p1> string is overwritten with '0' chars.
+ // Returns true if <p1> starts with <p2>. In that case, the reminder of the <p1> string
+ // is overwritten with '0' chars.
  // p1: null-terminated string
- // p2: must not contain a null character within <Len2>
+ // p2: null-terminated string
  //=============================================================================
-class function TCallHook.StartsWith(p1, p2: PChar; Len2: uint32): boolean;
+class function TCallHook.CheckString(p1, p2: PChar): boolean;
 begin
-  repeat
+  while p2^ <> #0 do begin
 	if p1^ <> p2^ then exit(false);
-	dec(Len2);
-	if Len2 = 0 then break;
 	inc(p1);
 	inc(p2);
-  until false;
+  end;
 
-  repeat
-	inc(p1);
-	if p1^ = #0 then break;
+  while p1^ <> #0 do begin
 	p1^ := '0';
-  until false;
+	inc(p1);
+  end;
 
   Result := true;
 end;
@@ -103,106 +109,73 @@ end;
  //=============================================================================
  // Is executed instead of the orignal GlobalAddAtom() function, and corrects the problematic atom names.
  // For example, the atom name 'ControlOfs00B2000000004DB8' is changed to 'ControlOfs0000000000000000'.
+ // The strings in question are normal Delphi strings, therefore WriteProcessMemory is not needed.
  //=============================================================================
 class function TCallHook.HookedGlobalAddAtom(lpString: PChar): ATOM; stdcall;
-const
-  // Controls.InitControls (line 15124)
-  Name1: array [0..5] of Char = 'Delphi';
-  Name1Len = System.Length(Name1);
+begin
+  // 'Delphi': Controls.InitControls (line 15124)
+  // 'ControlOfs': Controls.InitControls (line 15126)
+  // 'WndProcPtr': Dialogs.InitGlobals (line 6480)
+  if not CheckString(lpString, 'Delphi') then
+	if not CheckString(lpString, 'ControlOfs') then
+	  CheckString(lpString, 'WndProcPtr');
 
-  // Controls.InitControls (line 15126)
-  Name2: array [0..9] of Char = 'ControlOfs';
-  Name2Len = System.Length(Name2);
-
-  // Dialogs.InitGlobals (line 6480)
-  Name3: array [0..9] of Char = 'WndProcPtr';
-  Name3Len = System.Length(Name3);
-asm
-  PUSH EAX
-  PUSH EDX
-  PUSH ECX
-
-  // EAX := lpString
-  // EDX := AtomName
-  // ECX := Length(AtomName)
-
-  MOV EAX, lpString
-  LEA EDX, Name1
-  MOV ECX, Name1Len
-  CALL StartsWith
-  TEST AL, AL
-  JNZ @Found
-
-  MOV EAX, lpString
-  LEA EDX, Name2
-  MOV ECX, Name2Len
-  CALL StartsWith
-  TEST AL, AL
-  JNZ @Found
-
-  MOV EAX, lpString
-  LEA EDX, Name3
-  MOV ECX, Name3Len
-  CALL StartsWith
-
-@Found:
-  POP ECX
-  POP EDX
-  POP EAX
-  JMP [FContAddr];
+  Result := TFunc(FFuncPtr)(lpString);
 end;
 
 
+// This is unified by the linker with all other references to the same external function (ONLY if the Delphi symbol
+// starts with '_' !), in that all unit-specific trampolines (indirect jumps) share the same fixup pointer.
+function _GlobalAddAtom(lpString: PChar): ATOM; stdcall; external kernel32 name {$ifdef UNICODE}'GlobalAddAtomW'{$else}'GlobalAddAtomA'{$endif};
+
+
  //=============================================================================
- // Enables interception of GlobalAddAtom calls.
+ // Starts interception of GlobalAddAtom calls.
  //=============================================================================
 class procedure TCallHook.HookGlobalAddAtom;
 type
-  PBackupBuffer = ^TBackupBuffer;
+  PULONG_PTR = ^ULONG_PTR;
 var
-  p: PByte;
-  Buffer: TJmpCode;
+  FixupItem: PPointer;
+  NewAddr: pointer;
 begin
-  FhInst := Windows.LoadLibrary(Windows.kernel32);
-  Assert(FhInst <> 0);
+  NewAddr := Addr(HookedGlobalAddAtom);
 
-  p := Windows.GetProcAddress(FhInst, {$ifdef UNICODE}'GlobalAddAtomW'{$else}'GlobalAddAtomA'{$endif});
-  Assert(p <> nil);
+  // Delphi calls external function always indirectly, through a pointer in a global fixup table:
+  // (https://www.felixcloutier.com/x86/jmp)
+  Assert(PTrampoline(@_GlobalAddAtom).OpCode = $25FF);
 
-  // save the starting 5 bytes:
-  FBackupBuffer := PBackupBuffer(p)^;
-
-  // overwrite the starting 5 bytes which has this content:
-  //  MOV  EDI, EDI
-  //  PUSH EBP
-  //  MOV  EBP, ESP
-  // https://www.felixcloutier.com/x86/jmp
-  FContAddr := p + sizeof(TJmpCode);
-  Buffer.JmpCode := $E9;
-  Buffer.JmpOffset := PByte(@HookedGlobalAddAtom) - FContAddr;
-
+  // modify the target address (initially set by the Windows loader) in the compiler-generated fixup table:
+  // "How is it that WriteProcessMemory succeeds in writing to read-only memory?":
   // https://devblogs.microsoft.com/oldnewthing/20181206-00/?p=100415
-  Windows.WriteProcessMemory(FCurrentProcess, p, @Buffer, sizeof(Buffer), PDWORD(nil)^);
+
+  {$ifdef CPU64Bits}
+  FixupItem := PPointer(PByte(@_GlobalAddAtom) + sizeof(TTrampoline) + PTrampoline(@_GlobalAddAtom).RelativeIndirectAddr);
+  {$else}
+  FixupItem := PTrampoline(@_GlobalAddAtom).IndirectAddr;
+  {$endif}
+  FFuncPtr := FixupItem^;
+  Windows.WriteProcessMemory(FCurrentProcess, FixupItem, @NewAddr, sizeof(NewAddr), PULONG_PTR(nil)^);
 end;
 
 
+(*
  //=============================================================================
- // Disables interception of GlobalAddAtom calls.
+ // Stops interception of GlobalAddAtom calls. This is only necessary if this unit is linked into a DLL which
+ // can be unloaded by the app.
  //=============================================================================
 class procedure TCallHook.UnhookGlobalAddAtom;
 begin
-  if FBackupBuffer[0] <> 0 then begin
-	Windows.WriteProcessMemory(FCurrentProcess, FContAddr - sizeof(TJmpCode), @FBackupBuffer, sizeof(FBackupBuffer), PDWORD(nil)^);
-	Windows.FreeLibrary(FhInst);
-	FBackupBuffer[0] := 0;
+  if FFuncPtr <> nil then begin
+	Windows.WriteProcessMemory(FCurrentProcess, PTrampoline(@_GlobalAddAtom).IndirectAddr, @FFuncPtr, sizeof(FFuncPtr), PDWORD(nil)^);
+	FFuncPtr := nil;
   end;
 end;
+*)
 
 
 initialization
   TCallHook.HookGlobalAddAtom;
-finalization
-  TCallHook.UnhookGlobalAddAtom;
 
 {$ifend}
 end.
