@@ -56,8 +56,8 @@ unit PrintersEx;
   operations:
   - Call TPrinterEx.SetMapMode() as the first action on each page to specify the "logical unit" that will subsequently
 	be used for all dimensions and coordinates.
-  - Specify TPen.Width, TFont.Height and all extends and coordinates in the selected logical unit.
-  - TCanvase.TextWidth ans the like will correctly use the logical unit set by SetMapMode().
+  - Specify TPen.Width, TFont.Height and all extents and coordinates in the selected logical unit.
+  - TCanvase.TextWidth and the like will correctly use the logical unit set by SetMapMode().
   - For extra precision, use TFont.Height instead of TFont.Size, as this will prevent some rounding error due to .Size
 	using a unit of measure of 1/72 inch.
   - If you create TFont objects, set TFont.PixelPerInch to TPrinterEx.UnitsPerInch together with TFont.Height: This will
@@ -133,7 +133,7 @@ type
   // It is possible to have multiple objects for the same Windows printer, each with its own settings, and each with
   // its own active print job.
   // A TPrinterEx object is not bound to a specific thread; methods or properties can be accessed from any thread as
-  // long as this is not done at the same time.
+  // long as no two thread are doing this at the same time.
   TPrinterEx = class(TObject)
   strict private type
 	TState = (psIdle, psPrinting, psAborted);
@@ -247,7 +247,7 @@ function _IsValidDevmode(pDevmode: PDevMode; DevmodeSize: UINT_PTR): BOOL; stdca
  external WinSpool.winspl name {$ifdef UNICODE}'IsValidDevmodeW'{$else}'IsValidDevmodeA'{$endif};
 
 function _GetDefaultPrinter(DefaultPrinter: PChar; var I: DWORD): BOOL; stdcall;
-  external winspl name {$ifdef UNICODE}'GetDefaultPrinterW'{$else}'GetDefaultPrinterA'{$endif};
+ external WinSpool.winspl name {$ifdef UNICODE}'GetDefaultPrinterW'{$else}'GetDefaultPrinterA'{$endif};
 
 
 procedure RaiseError(const Msg: string);
@@ -477,10 +477,10 @@ begin
 
   // deselect the font from the DC:
   FCanvas.Refresh;
-  // Force FCanvas.Font.PixelsPerInch to match FUnitsPerInch (FCanvas is only allocated ones + the VCL seems to expect
-  // TCanvas.PixelsPerInch to be the resolution of the device context).
-  // TCanvas.PixelsPerInch is used when a font is assigned to the canvas: If source and target font have different
-  // PixelsPerInch values, then .Height of the copied font is recalculated from its .Size property.
+  // Force FCanvas.Font.PixelsPerInch to match FUnitsPerInch (FCanvas is only allocated once + the VCL seems to expect
+  // TCanvas.Font.PixelsPerInch to be the resolution of the device context).
+  // TCanvas.Font.PixelsPerInch is used when a font is assigned to the canvas: If source and target font have different
+  // PixelsPerInch values, then the .Height of the assigned font is recalculated from its .Size property.
   TPrinterCanvas(FCanvas).UpdateFont;
 end;
 
@@ -900,8 +900,8 @@ begin
   if (ID <= 0) or (ID > uint16(High(FDevMode.dmDefaultSource))) then
 	RaiseInvalidParamError;
 
+  Assert(FDevMode.dmFields and DM_DEFAULTSOURCE <> 0);
   FDevModeChanged := true;
-  FDevMode.dmFields := DevMode.dmFields or DM_DEFAULTSOURCE;
   FDevMode.dmDefaultSource := ID;
 end;
 
@@ -926,8 +926,9 @@ begin
   if (ID <= 0) or (ID > uint16(High(FDevMode.dmPaperSize))) then
 	RaiseInvalidParamError;
 
+  Assert(FDevMode.dmFields and DM_PAPERSIZE <> 0);
   FDevModeChanged := true;
-  FDevMode.dmFields := FDevMode.dmFields and not (DM_PAPERWIDTH or DM_PAPERLENGTH) or DM_PAPERSIZE;
+  FDevMode.dmFields := FDevMode.dmFields and not (DM_PAPERWIDTH or DM_PAPERLENGTH);
   FDevMode.dmPaperSize := ID;
 end;
 
@@ -937,11 +938,14 @@ end;
  //===================================================================================================================
 procedure TPrinterEx.SetCustomPaperSize(const Size: TSize);
 begin
+  CheckCapability(pcPaperSize);
+
   if (Size.cx <= 0) or (Size.cy <= 0) then
 	RaiseInvalidParamError;
 
+  Assert(FDevMode.dmFields and DM_PAPERSIZE <> 0);
   FDevModeChanged := true;
-  FDevMode.dmFields := FDevMode.dmFields or DM_PAPERSIZE or DM_PAPERWIDTH or DM_PAPERLENGTH;
+  FDevMode.dmFields := FDevMode.dmFields or DM_PAPERWIDTH or DM_PAPERLENGTH;
   FDevMode.dmPaperSize := 0;
   FDevMode.dmPaperWidth := Size.cx;
   FDevMode.dmPaperLength := Size.cy;
@@ -975,8 +979,8 @@ begin
   if ID = 0 then
 	RaiseInvalidParamError;
 
+  Assert(FDevMode.dmFields and DM_MEDIATYPE <> 0);
   FDevModeChanged := true;
-  FDevMode.dmFields := FDevMode.dmFields or DM_MEDIATYPE;
   FDevMode.dmMediaType := ID;
 end;
 
@@ -1056,7 +1060,7 @@ end;
 
 
  //===================================================================================================================
- // List of all fonts available at this printer, including device-specific fonts.
+ // Returns all fonts available at this printer, including device-specific fonts.
  //===================================================================================================================
 function TPrinterEx.GetFonts: TStringDynArray;
 var
@@ -1089,7 +1093,7 @@ end;
 
 
  //===================================================================================================================
- // List of all fonts available at this printer, including device-specific fonts.
+ // Returns all fonts available at this printer, including device-specific fonts.
  // Unlike GetFont, you also get all the properties describing the fonts.
  //===================================================================================================================
 function TPrinterEx.GetFontsEx: TFontDynArray;
@@ -1180,7 +1184,7 @@ begin
 	WinSpool.ClosePrinter(hPrinter);
   end;
 
-  // combine names and IDs in the result array:
+  // combine names and IDs in the result:
 
   System.SetLength(Result, CountIDs);
 
@@ -1197,7 +1201,7 @@ end;
 
  //===================================================================================================================
  // Returns true, if
- // - <Name> is name of an existing local printer
+ // - <Name> is the name of an existing local printer
  // - <Name> is the UNC name of an existing shared printer (\\server\printername)
  // and the user has the Windows permissions to at least query the printer.
  // If false is returned, Windows.GetLastError can be queried.
