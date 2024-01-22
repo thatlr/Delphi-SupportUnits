@@ -1343,14 +1343,14 @@ try
   // create print job; the spooler will write the generated printer data to the file:
   p.BeginDoc('Test', 'C:\TEMP\test.pdf');
 
-  // set logical units to 0.1 mm:
+  // set logical units to 0.01 mm:
   p.SetMapMode(MM_HIMETRIC);
   // dont fill background of text:
   p.Canvas.Brush.Style := bsClear;
 
 //  // set font height to exact 10mm:
 //  p.Canvas.Font.PixelsPerInch := p.UnitsPerInch;
-//  p.Canvas.Font.Height := 1000;	// 10mm in MM_LOMETRIC (logical unit = 0.01 mm)
+//  p.Canvas.Font.Height := 1000;	// 10mm in MM_HIMETRIC (logical unit = 0.01 mm)
 
   p.Canvas.Font.Size := 15;
 
@@ -1368,7 +1368,7 @@ try
   p.Canvas.Rectangle(1000, 1000, 1000 + p.Canvas.TextWidth(Page2), 1000 + p.Canvas.TextHeight(Page2));
   p.Canvas.TextOut(1000, 1000, Page2);
 
-  // .Size gets converted by Assign to the printer's resolution (-29 at 96dpi => -776 for MM_HIMETRIC):
+  // .Size gets converted by Assign to the printer's resolution (-29 at 96dpi => -776 at MM_HIMETRIC):
   f := TFont.Create;
   f.Size := 22;
   p.Canvas.Font.Assign(f);
