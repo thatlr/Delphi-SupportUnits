@@ -1,10 +1,30 @@
 # Delphi-SupportUnits
-Various units to deal with memory allocation and general issues.
+Various units for resolving issues or expanding/correcting Delphi functionality.
 
 
 General note:
 I do believe that someone could benefit from the publication of this helper units, but if you have other or better solutions, or don't see
 the issues addressed here, please continue to go your own way.
+
+
+## PrintersEx
+
+This is a thread-safe alternative to Delphi's "Printers" unit.
+
+Enhancements over the VCL unit "Printers":
+  - Completely thread-safe.
+  - Correct handling of dialog cancellation during print-to-file / print-to-PDF.
+  - No use of obsolete Win95-like constructs like GlobalAlloc or GetPrinter/SetPrinter with Device+Port+Driver.
+  - Offers more printers settings to query and select, like paper formats and paper sources (aka "bins").
+  - Allows to select custom paper sizes (support depends on the printer driver, as for all other settings).
+  - Allows changing of page properties from page to page inside a print job (for example, the orientation).
+  - Allows print-to-file by the application.
+  - Allows to query page size, printable area and non-printable page margins.
+  - Calling Abort is always possible (even when no job is active), so exception handling by the app is straight-forward.
+  - Error checking at all GDI calls.
+
+Since it is thread-safe and has no global state (no global TPrinter.PrinterIndex), it can be used by threads/tasks to generate
+print jobs, independently and in parallel, even on the same printer.
 
 
 ## ReserveLow2GB
