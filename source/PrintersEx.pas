@@ -938,14 +938,15 @@ end;
  //===================================================================================================================
 procedure TPrinterEx.SetCustomPaperSize(const Size: TSize);
 begin
-  CheckCapability(pcPaperSize);
+  // Specifying a custom paper size is possible even when the printer does not know of any standard paper size
+  // (this is a possible by installing a printer with a customized PPD file).
+  // There seems to be no indication if the printer allows to set a custom page size.
 
   if (Size.cx <= 0) or (Size.cy <= 0) then
 	RaiseInvalidParamError;
 
-  Assert(FDevMode.dmFields and DM_PAPERSIZE <> 0);
   FDevModeChanged := true;
-  FDevMode.dmFields := FDevMode.dmFields or DM_PAPERWIDTH or DM_PAPERLENGTH;
+  FDevMode.dmFields := FDevMode.dmFields or DM_PAPERSIZE or DM_PAPERWIDTH or DM_PAPERLENGTH;
   FDevMode.dmPaperSize := 0;
   FDevMode.dmPaperWidth := Size.cx;
   FDevMode.dmPaperLength := Size.cy;
