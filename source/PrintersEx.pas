@@ -28,7 +28,7 @@ unit PrintersEx;
 
   Font sizes:
 
-  TFont have a Size and a Height property, of which Size is device-independend, and Height is expressed in the logical
+  TFont have a Size and a Height property, of which Size is device-independent, and Height is expressed in the logical
   unit of measure that the output device is using for its Y axis (normally, this logical unit is "Pixel", as the
   default GDI mapping mode is MM_TEXT).
   You need to take into account the following:
@@ -114,13 +114,15 @@ type
   TPrinterOptions = array of TPrinterOption;
 
 
+  // https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-logfontw
+  // https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-textmetricw
   TFontItem = record
   strict private
 	function GetOption(Index: int32): boolean; inline;
   public
 	Name: string;
 	Props: Windows.TLogFont;
-	Metric: WIndows.TTextMetric;
+	Metric: Windows.TTextMetric;
 	property IsFixedPitch: boolean index TMPF_FIXED_PITCH read GetOption;
 	property IsVector: boolean     index TMPF_VECTOR read GetOption;
 	property IsDeviceFont: boolean index TMPF_DEVICE read GetOption;
@@ -273,7 +275,7 @@ end;
  //===================================================================================================================
 function TFontItem.GetOption(Index: int32): boolean;
 begin
-  Result := self.Props.lfPitchAndFamily and byte(Index) <> 0;
+  Result := self.Metric.tmPitchAndFamily and byte(Index) <> 0;
 end;
 
 
@@ -335,7 +337,7 @@ begin
 	// updating Font.Height is not really important, but done for consistency before/after SetMapMode calls:
 	self.Font.Height := MulDiv(self.Font.Height, FPrinter.UnitsPerInch, self.Font.PixelsPerInch);
 	// this is important:
-	self.Font.PixelsPerInch :=  FPrinter.UnitsPerInch;
+	self.Font.PixelsPerInch := FPrinter.UnitsPerInch;
   end;
 end;
 
@@ -458,7 +460,7 @@ begin
   else          RaiseInvalidParamError;
   end;
 
-  // only GM_ADVANCED supports scaling of fonts for both the X and Y axis independent of each other (see note below):
+  // only GM_ADVANCED supports font scaling for both the X and Y axes independently (see note below):
   Win32Check(Windows.SetGraphicsMode(FDC, GM_ADVANCED) <> 0);
   Win32Check(Windows.SetMapMode(FDC, MapMode) <> 0);
 
@@ -865,7 +867,7 @@ end;
 
  //===================================================================================================================
  // Returns all supported options to feed paper into the printer.
- // Returns an empty list if the printer do not have a conctept of "paper sources".
+ // Returns an empty list if the printer has no concept of "paper sources".
  //===================================================================================================================
 function TPrinterEx.GetPaperSources: TPrinterOptions;
 var
@@ -908,7 +910,7 @@ end;
 
  //===================================================================================================================
  // Returns all supported paper formats (like 'Letter', 'A4').
- // Returns an empty list if the printer do not have a conctept of "paper formats".
+ // Returns an empty list if the printer has no concept of "paper formats".
  //===================================================================================================================
 function TPrinterEx.GetPaperSizes: TPrinterOptions;
 begin
@@ -942,7 +944,7 @@ begin
   // (this is a possible by installing a printer with a customized PPD file).
   // There seems to be no indication if the printer allows to set a custom page size.
 
-  if (Size.cx <= 0) or (Size.cy <= 0) then
+  if (Size.cx <= 0) or (Size.cx > High(FDevMode.dmPaperWidth)) or (Size.cy <= 0) or (Size.cy > High(FDevMode.dmPaperLength)) then
 	RaiseInvalidParamError;
 
   FDevModeChanged := true;
@@ -955,9 +957,9 @@ end;
 
  //===================================================================================================================
  // Returns all supported media types (like 'HP Edgeline 180g, high-gloss').
- // Returns an empty list if the printer do not have a conctept of "media types".
+ // Returns an empty list if the printer has no concept of "media types".
  //
- // Note that the HP PCL driver may return empty names for the last items in the list: These represents some kind of
+ // Note that the HP PCL driver may return empty names for the last items in the list: These represent some kind of
  // custom media types (USERDEFINEDMEDIA1 .. USERDEFINEDMEDIA10), as one can see here in the registry:
  // HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Print\Printers\your-hp-printer\PrinterDriverData\JCTData
  //===================================================================================================================
@@ -997,7 +999,7 @@ end;
 
 
  //===================================================================================================================
- // Returns the overall size of the page (including non-printable margins), in 0.1 mm units.
+ // Returns the overall size of the page, including non-printable margins, in 0.1 mm units.
  //===================================================================================================================
 function TPrinterEx.GetPageSize: TSize;
 begin
@@ -1034,8 +1036,8 @@ end;
 
  //===================================================================================================================
  // Returns the physical resolution of the printer in pixels per inch ("Dots Per Inch").
- // For some printers, the X and Y axis might have a different resolution.
- // (For example, Brother specifies 4800 x 1200 dpi for the "MFCJ5855DW" model.)
+ // For some printers, the X and Y axis might have a different resolution (for example, Brother specifies
+ // 4800 x 1200 dpi for the "MFCJ5855DW" model.)
  //===================================================================================================================
 function TPrinterEx.GetDPI: TSize;
 begin
@@ -1054,7 +1056,6 @@ begin
   if Data.Count >= System.Length(Data.Names) then
 	System.SetLength(Data.Names, Data.Count + 1024);
   Data.Names[Data.Count] := LogFont.lfFaceName;
-//  IsDeviceFont := LogFont.lfPitchAndFamily and TMPF_DEVICE <> 0;
   inc(Data.Count);
   Result := 1;
 end;
@@ -1095,7 +1096,7 @@ end;
 
  //===================================================================================================================
  // Returns all fonts available at this printer, including device-specific fonts.
- // Unlike GetFont, you also get all the properties describing the fonts.
+ // Unlike GetFont, you also get additional data describing the fonts.
  //===================================================================================================================
 function TPrinterEx.GetFontsEx: TFontDynArray;
 var
@@ -1201,10 +1202,8 @@ end;
 
 
  //===================================================================================================================
- // Returns true, if
- // - <Name> is the name of an existing local printer
- // - <Name> is the UNC name of an existing shared printer (\\server\printername)
- // and the user has the Windows permissions to at least query the printer.
+ // Returns true, if <Name> is the name of an existing local printer or is the UNC name of an existing shared printer
+ // (\\server\printername), and if the user has the Windows permissions to at least query the printer.
  // If false is returned, Windows.GetLastError can be queried.
  //===================================================================================================================
 class function TPrinterEx.PrinterExists(const Name: string): boolean;
