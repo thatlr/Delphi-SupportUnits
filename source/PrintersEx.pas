@@ -6,6 +6,7 @@ unit PrintersEx;
   in the same or in different threads.
 
   Enhancements over the VCL unit "Printers":
+
   - Completely thread-safe.
   - Correct handling of dialog cancellation during print-to-file / print-to-PDF.
   - No use of obsolete Win95-like constructs like GlobalAlloc or GetPrinter/SetPrinter with Device+Port+Driver.
@@ -18,12 +19,24 @@ unit PrintersEx;
   - Error checking at all GDI calls.
 
   Differences in behavior:
+
   - Accessing printer settings not supported by the printer will cause an exception. Even reading such a setting has no
 	meaning if the printer driver does not support this concept (for example, receipt printers have no concept of
 	landscape/portrait orientation or paper formats).
+
   - All device context properties that are not represented by VCL objects are reset for each page: This means that
 	Pen, Brush, Font, CopyMode and TextFlags are retained, but PenPos and everything one can set directly at the GDI
 	Device Context (like Mapping Mode, global transformation) start fresh.
+
+
+  Threading:
+
+  - You need to take this TBitmap issue into account:
+	https://stackoverflow.com/questions/53696554/gdi-printer-device-context-in-a-worker-thread-randomly-fails
+
+  - Up to and including Delphi 10.1, the handling of TWICImage.FImagingFactory was not thread-safe. This is fixed
+	in Delphi 10.3. (TWICImage.ImagingFactory is still broken, as it does not attempt to create the interface
+	when it is currently not allocated.)
 
 
   Font sizes:
@@ -31,14 +44,19 @@ unit PrintersEx;
   TFont have a Size and a Height property, of which Size is device-independent, and Height is expressed in the logical
   unit of measure that the output device is using for its Y axis (normally, this logical unit is "Pixel", as the
   default GDI mapping mode is MM_TEXT).
+
   You need to take into account the following:
+
   - TFont.Create() sets the PixelPerInch property to the DPI value of the Windows desktop (Graphics.pas: InitScreenLogPixels),
 	as detected at startup of the program.
+
   - If you assign a font object to another font object and the PixelsPerInch valus of both are different, then
 	TFont.Assign() will recalculate the Height at the target object to match the target's PixelPerInch value. This
 	recalculation may cause some rounding error (Height in source units => Size => Height in destination units).
+
   - TFont.PixelPerInch is misnamed. It should be called UnitsPerInch, as this is how it works when the logical units
 	of the respective TCanvas in not Pixel (MM_TEXT) but something else.
+
   Therefore, if you want to specify the font size as accurately as possible, you should not set TFont.Size, but rather
   TFont.PixelsPerInch *and* TFont.Height as follows:
 	f.PixelsPerInch := PrinterObj.UnitsPerInch;
@@ -152,7 +170,7 @@ type
 	FCapabilities: TPrinterCapabilities;
 
 	procedure ConvToLoMM(var Size: TSize);
-	procedure CreateDC(StartPrint: boolean);
+	procedure CreateIC;
 	procedure DeleteDC;
 	function GetOptions(CapNames, CapIDs, LenName, LenID: uint16): TPrinterOptions;
 	procedure CheckCapability(Capability: TPrinterCapability);
@@ -232,7 +250,8 @@ implementation
 
 uses
   Consts,
-  WinSpool;
+  WinSpool,
+  WinSlimLock;
 
 type
   TFontEnum = record
@@ -250,6 +269,28 @@ function _IsValidDevmode(pDevmode: PDevMode; DevmodeSize: UINT_PTR): BOOL; stdca
 
 function _GetDefaultPrinter(DefaultPrinter: PChar; var I: DWORD): BOOL; stdcall;
  external WinSpool.winspl name {$ifdef UNICODE}'GetDefaultPrinterW'{$else}'GetDefaultPrinterA'{$endif};
+
+
+// Workaround for a multi-threading bug in gdi32full.dll, version 10.0.19041.3803, at least for 32bit processes:
+//
+// Printing multiple jobs in parallel from multiple threads to the same printer causes an access violation in GDI,
+// if ResetDC() is used in TPrinterEx.NewPage. The exception occurs in some job which has never called ResetDC (prints
+// only one page), if another job is printing multiple pages and thus is calling ResetDC().
+// When the access violation happens, some critical section is still owned by the thread in which it occured,
+// preventing any further printing.
+//
+// Access violation at address 7629EAAA in module 'gdi32full.dll'. Read of address 0000008C
+//  at gdi32full.dll: METALINK::pmetalinkNext + 0x1A
+//  at gdi32full.dll: vFreeMHE + 0x3719F
+//  at gdi32full.dll: vFreeMDC + 0xAD
+//  at gdi32full.dll: UnassociateEnhMetaFile + 0x142
+//  at gdi32full.dll: MFP_InternalEndPage + 0xD8
+//  at gdi32full.dll: InternalEndPage + 0x74
+//  at gdi32full.dll: EndPageImpl + 0x10
+//  at GDI32.dll: EndPage + 0x3E
+//  at Test.exe: TPrinterEx.EndDoc in PrintersEx.pas (Line 578)
+var
+  Lock: TSlimRWLock;
 
 
 procedure RaiseError(const Msg: string);
@@ -305,7 +346,7 @@ end;
 
 
  //===================================================================================================================
- // should be called by TCanvas only once per print job:
+ // should be called by TCanvas only once per page:
  //===================================================================================================================
 procedure TPrinterCanvas.CreateHandle;
 begin
@@ -380,10 +421,8 @@ end;
  //===================================================================================================================
 destructor TPrinterEx.Destroy;
 begin
-  if FDC <> 0 then begin
-	Windows.AbortDoc(FDC);
-	Windows.DeleteDC(FDC);
-  end;
+  self.Abort;
+  if FDC <> 0 then self.DeleteDC;
 
   FCanvas.Free;
   FreeMem(FDevMode);
@@ -401,26 +440,19 @@ end;
 
 
  //===================================================================================================================
- // Create the device context using the current content of FDevMode, or update it.
+ // Create an information context using the current content of FDevMode, or update it.
  //===================================================================================================================
-procedure TPrinterEx.CreateDC(StartPrint: boolean);
-var
-  Create: function (lpszDriver, lpszDevice, lpszOutput: PChar; lpdvmInit: PDeviceMode): HDC; stdcall;
+procedure TPrinterEx.CreateIC;
 begin
   if FDC = 0 then begin
-	// create device context:
-	if StartPrint then
-	  Create := Windows.CreateDC
-	else
-	  Create := Windows.CreateIC;
-
-	FDC := Create(nil, PChar(FName), nil, FDevMode);
-	if FDC = 0 then RaiseError(Consts.SInvalidPrinter);
+	FDC := Windows.CreateIC(nil, PChar(FName), nil, FDevMode);
+	Win32Check(FDC <> 0);
+	FDevModeChanged := false;
   end
-  else if FDevModeChanged then begin
+  else if FDevModeChanged and (FState <> psPrinting) then begin
 	Win32Check( Windows.ResetDC(FDC, FDevMode^) <> 0);
+	FDevModeChanged := false;
   end;
-  FDevModeChanged := false;
 end;
 
 
@@ -516,17 +548,16 @@ end;
 procedure TPrinterEx.BeginDoc(const JobName: string; const OutputFilename: string = '');
 var
   DocInfo: Windows.TDocInfo;
-  err: DWORD;
   ActiveWnd: HWND;
   Reenable: boolean;
 begin
   self.CheckPrinting(false);
   // always start with a fresh DC:
   if FDC <> 0 then self.DeleteDC;
-  self.CreateDC(true);
-  FState := psPrinting;
 
-  FPageNumber := 1;
+  FDC := Windows.CreateDC(nil, PChar(FName), nil, FDevMode);
+  Win32Check(FDC <> 0);
+  FDevModeChanged := false;
 
   // The file-selection dialog of "Microsoft Print to PDF" select a wrong window as its owner (it uses the *owner* of
   // the active window instead of the active window itself). To mitigate this error, we
@@ -550,13 +581,10 @@ begin
 
 	// for Print-To-Pdf (or Print-to-File for normal printers), StartDoc() shows a dialog which the user can cancel
 	// => handle the error:
-	if (Windows.StartDoc(FDC, DocInfo) <= 0) or (Windows.StartPage(FDC) <= 0) then begin
-	  err := Windows.GetLastError;
-	  // dont stay in "Printing" state:
-	  self.Abort;
-	  // throw EAbort if the dialog was cancelled by the user:
-	  if err = ERROR_CANCELLED then SysUtils.Abort;
-	  RaiseError(SysErrorMessage(err));
+	if Windows.StartDoc(FDC, DocInfo) <= 0 then begin
+	  // if the dialog was not cancelled by the user, throw a normal exception:
+	  Win32Check(Windows.GetLastError = ERROR_CANCELLED);
+	  SysUtils.Abort;
 	end;
   finally
 	if Reenable then Windows.EnableWindow(ActiveWnd, true);
@@ -564,6 +592,13 @@ begin
   end;
 
   //Assert((FCanvas.PenPos.X = 0) and (FCanvas.PenPos.Y = 0));
+
+  // StartDoc() has created a job in the spooler => enable AbortDoc():
+  FState := psPrinting;
+
+  FPageNumber := 1;
+
+  Win32Check(Windows.StartPage(FDC) > 0);
 end;
 
 
@@ -575,9 +610,17 @@ begin
   self.CheckPrinting(true);
   try
 	Assert(FDC <> 0);
-	Win32Check(Windows.EndPage(FDC) > 0);
-	Win32Check(Windows.EndDoc(FDC) > 0);
 	FCanvas.Handle := 0;
+
+	Lock.AcquireExclusive;
+	try
+	  Win32Check(Windows.EndPage(FDC) > 0);
+	finally
+	  Lock.ReleaseExclusive;
+	end;
+
+	Win32Check(Windows.EndDoc(FDC) > 0);
+
 	FState := psIdle;
   except
 	self.Abort;
@@ -595,10 +638,12 @@ end;
 procedure TPrinterEx.Abort;
 begin
   if FState = psPrinting then begin
-	if FDC <> 0 then
-	  Win32Check(Windows.AbortDoc(FDC) > 0);
-	FCanvas.Handle := 0;
+	// use AbortDoc() only once and only between StartDoc() and EndDoc():
 	FState := psAborted;
+
+	Assert(FDC <> 0);
+	FCanvas.Handle := 0;
+	Win32Check(Windows.AbortDoc(FDC) > 0);
   end;
 end;
 
@@ -611,21 +656,33 @@ end;
 procedure TPrinterEx.NewPage;
 begin
   self.CheckPrinting(true);
-  Win32Check(Windows.EndPage(FDC) > 0);
 
-  // deselect Font+Pen+Brush from DC and adjust the Canvas state:
-  FCanvas.Refresh;
+  // after ResetDC, the DC can have different properties, so unassociate FCanvas from it:
+  FCanvas.Handle := 0;
 
-  // ResetDC() resets the mapping mode (SetMapMode + SetViewportExtEx + SetWindowExtEx) and the world transformation
-  // (SetWorldTransform), the origins (SetViewportOrgEx + SetWindowOrgEx + SetBrushOrgEx), maybe also the graphics mode
-  // (SetGraphicsMode):
-  Win32Check(Windows.ResetDC(FDC, FDevMode^) <> 0);
-  FDevModeChanged := false;
+  Lock.AcquireExclusive;
+  try
+	Win32Check(Windows.EndPage(FDC) > 0);
 
-  //Assert((FCanvas.PenPos.X = 0) and (FCanvas.PenPos.Y = 0));
+	// apply current settings to the DC:
+	// ResetDC() resets the mapping mode (SetMapMode + SetViewportExtEx + SetWindowExtEx) and the world transformation
+	// (SetWorldTransform), the origins (SetViewportOrgEx + SetWindowOrgEx + SetBrushOrgEx), maybe also the graphics mode
+	// (SetGraphicsMode):
+	// According to https://referencesource.microsoft.com/#System.Drawing/commonui/System/Drawing/Printing/DefaultPrintController.cs
+	// and the docs, ResetDC() always returns the same handle as given.
+	Win32Check( Windows.ResetDC(FDC, FDevMode^) <> 0);
+	FDevModeChanged := false;
+  finally
+	Lock.ReleaseExclusive;
+  end;
+
+  // ResetDC might have altered the page orientation:
+  FUnitsPerInch := self.GetDPI.cy;
 
   Win32Check(Windows.StartPage(FDC) > 0);
   Inc(FPageNumber);
+
+  //Assert((FCanvas.PenPos.X = 0) and (FCanvas.PenPos.Y = 0));
 end;
 
 
@@ -636,59 +693,59 @@ end;
  // The call does not transfer ownership of <Value>.
  // To make the object aware of changes made directly to fields of the DevMode property, use this:
  //   obj.SetDevMode(obj.DevMode);
+ // If a print job is currently generated, any changes will be delayed until the next page.
  //===================================================================================================================
 procedure TPrinterEx.SetDevMode(Value: PDeviceMode);
 var
-  hPrinter: THandle;
+  Size: integer;
 begin
-  Win32Check( WinSpool.OpenPrinter(PChar(FName), hPrinter, nil) );
-  try
+  // allocate FDevMode only once:
+  if FDevMode = nil then begin
 
-	// allocate FDevMode only once:
-	if FDevMode = nil then begin
+	// According to method GetHdevmodeInternal in
+	//   https://referencesource.microsoft.com/#System.Drawing/commonui/System/Drawing/Printing/PrinterSettings.cs
+	// we dont need a printer handle for DocumentProperties().
+	Size := WinSpool.DocumentProperties(0, 0, PChar(FName), nil, nil, 0);
+	Win32Check(Size >= 0);
 
-	  GetMem(FDevMode, WinSpool.DocumentProperties(0, hPrinter, PChar(FName), nil, nil, 0));
-	  try
-		Win32Check( WinSpool.DocumentProperties(0, hPrinter, PChar(FName), FDevMode, nil, DM_OUT_BUFFER) >= 0)
-	  except
-		FreeMem(FDevMode);
-		FDevMode := nil;
-		raise;
-	  end;
-
-	  // determine capabilities of the printer or printer driver:
-	  FCapabilities := [];
-	  if FDevMode.dmFields and DM_ORIENTATION <> 0 then
-		Include(FCapabilities, pcOrientation);
-	  if FDevMode.dmFields and DM_COPIES <> 0 then
-		Include(FCapabilities, pcCopies);
-	  if FDevMode.dmFields and DM_COLLATE <> 0 then
-		Include(FCapabilities, pcCollation);
-	  if FDevMode.dmFields and DM_COlOR <> 0 then
-		Include(FCapabilities, pcColor);
-	  if FDevMode.dmFields and DM_DUPLEX <> 0 then
-		Include(FCapabilities, pcDuplex);
-	  if FDevMode.dmFields and DM_SCALE <> 0 then
-		Include(FCapabilities, pcScale);
-	  if FDevMode.dmFields and DM_DEFAULTSOURCE <> 0 then
-		Include(FCapabilities, pcPaperSource);
-	  if FDevMode.dmFields and DM_PAPERSIZE <> 0 then
-		Include(FCapabilities, pcPaperSize);
-	  if FDevMode.dmFields and DM_MEDIATYPE <> 0 then
-		Include(FCapabilities, pcMediaType);
-
+	GetMem(FDevMode, Size);
+	try
+	  Win32Check( WinSpool.DocumentProperties(0, 0, PChar(FName), FDevMode, nil, DM_OUT_BUFFER) >= 0)
+	except
+	  FreeMem(FDevMode);
+	  FDevMode := nil;
+	  raise;
 	end;
 
-	if Value <> nil then begin
-	  // basic validation of the given DEVMODE structure:
-	  Win32Check( _IsValidDevmode(Value, Value.dmSize + Value.dmDriverExtra) );
-	  // merge settings from <Value> with the current settings in FDevMode:
-	  Win32Check( WinSpool.DocumentProperties(0, hPrinter, PChar(FName), FDevMode, Value, DM_IN_BUFFER or DM_OUT_BUFFER) >= 0);
-	  FDevModeChanged := true;
-	end;
+	// determine capabilities of the printer or printer driver:
+	FCapabilities := [];
+	if FDevMode.dmFields and DM_ORIENTATION <> 0 then
+	  Include(FCapabilities, pcOrientation);
+	if FDevMode.dmFields and DM_COPIES <> 0 then
+	  Include(FCapabilities, pcCopies);
+	if FDevMode.dmFields and DM_COLLATE <> 0 then
+	  Include(FCapabilities, pcCollation);
+	if FDevMode.dmFields and DM_COlOR <> 0 then
+	  Include(FCapabilities, pcColor);
+	if FDevMode.dmFields and DM_DUPLEX <> 0 then
+	  Include(FCapabilities, pcDuplex);
+	if FDevMode.dmFields and DM_SCALE <> 0 then
+	  Include(FCapabilities, pcScale);
+	if FDevMode.dmFields and DM_DEFAULTSOURCE <> 0 then
+	  Include(FCapabilities, pcPaperSource);
+	if FDevMode.dmFields and DM_PAPERSIZE <> 0 then
+	  Include(FCapabilities, pcPaperSize);
+	if FDevMode.dmFields and DM_MEDIATYPE <> 0 then
+	  Include(FCapabilities, pcMediaType);
 
-  finally
-	WinSpool.ClosePrinter(hPrinter);
+  end;
+
+  if Value <> nil then begin
+	// basic validation of the given DEVMODE structure:
+	Win32Check( _IsValidDevmode(Value, Value.dmSize + Value.dmDriverExtra) );
+	// merge settings from <Value> with the current settings in FDevMode:
+	Win32Check( WinSpool.DocumentProperties(0, 0, PChar(FName), FDevMode, Value, DM_IN_BUFFER or DM_OUT_BUFFER) >= 0);
+	FDevModeChanged := true;
   end;
 end;
 
@@ -1003,7 +1060,7 @@ end;
  //===================================================================================================================
 function TPrinterEx.GetPageSize: TSize;
 begin
-  self.CreateDC(false);
+  self.CreateIC;
   Result.cx := Windows.GetDeviceCaps(FDC, PHYSICALWIDTH);
   Result.cy := Windows.GetDeviceCaps(FDC, PHYSICALHEIGHT);
   self.ConvToLoMM(Result);
@@ -1015,7 +1072,7 @@ end;
  //===================================================================================================================
 function TPrinterEx.GetPageMargins: TSize;
 begin
-  self.CreateDC(false);
+  self.CreateIC;
   Result.cx := Windows.GetDeviceCaps(FDC, PHYSICALOFFSETX);
   Result.cy := Windows.GetDeviceCaps(FDC, PHYSICALOFFSETY);
   self.ConvToLoMM(Result);
@@ -1027,7 +1084,7 @@ end;
  //===================================================================================================================
 function TPrinterEx.GetPrintableArea: TSize;
 begin
-  self.CreateDC(false);
+  self.CreateIC;
   Result.cx := Windows.GetDeviceCaps(FDC, HORZRES);
   Result.cy := Windows.GetDeviceCaps(FDC, VERTRES);
   self.ConvToLoMM(Result);
@@ -1041,7 +1098,7 @@ end;
  //===================================================================================================================
 function TPrinterEx.GetDPI: TSize;
 begin
-  self.CreateDC(false);
+  self.CreateIC;
   Result.cx := Windows.GetDeviceCaps(FDC, LOGPIXELSX);
   Result.cy := Windows.GetDeviceCaps(FDC, LOGPIXELSY);
 end;
@@ -1068,7 +1125,7 @@ function TPrinterEx.GetFonts: TStringDynArray;
 var
   Data: TFontEnum;
 begin
-  self.CreateDC(false);
+  self.CreateIC;
   Data.Count := 0;
   Windows.EnumFonts(FDC, nil, @EnumFontsProc, Pointer(@Data));
   Result := System.Copy(Data.Names, 0, Data.Count);
@@ -1102,7 +1159,7 @@ function TPrinterEx.GetFontsEx: TFontDynArray;
 var
   Data: TFontEnumEx;
 begin
-  self.CreateDC(false);
+  self.CreateIC;
   Data.Count := 0;
   Windows.EnumFonts(FDC, nil, @EnumFontsExProc, Pointer(@Data));
   Result := System.Copy(Data.Items, 0, Data.Count);
