@@ -34,9 +34,9 @@ unit PrintersEx;
   - You need to take this TBitmap issue into account:
 	https://stackoverflow.com/questions/53696554/gdi-printer-device-context-in-a-worker-thread-randomly-fails
 
-  - Up to and including Delphi 10.1, the handling of TWICImage.FImagingFactory was not thread-safe. This is fixed
-	in Delphi 10.3. (TWICImage.ImagingFactory is still broken, as it does not attempt to create the interface
-	when it is currently not allocated.)
+  - Up to and including Delphi 10.1, TWICImage is not thread-safe (FImagingFactory not correctly managed). This is fixed
+	in Delphi 10.3 (TWICImage.ImagingFactory is still broken, as it does not attempt to create the interface
+	when it is currently not allocated).
 
 
   Font sizes:
@@ -81,6 +81,60 @@ unit PrintersEx;
   - If you create TFont objects, set TFont.PixelPerInch to TPrinterEx.UnitsPerInch together with TFont.Height: This will
 	cause .Height to be used "as is", without going through a double-conversion via the .Size value from 96 dpi to the
 	printer's logical unit.
+
+
+  SaveDC/RestoreDC/GDI objects
+
+  If you use SaveDC/RestoreDC, or if you manually select objects into the DC by Windows.SelectObject(), you must make
+  sure to keep the state of the device context in sync with the TCanvas object.
+
+  For example, this sequence of calls
+
+		.....
+		save := Windows.SaveDC(DC);
+		.....
+		p.Canvas.Refresh;
+		Win32Check(Windows.RestoreDC(DC, save));
+		.....
+		p.NewPage;
+
+  will cause this error when used in a multi-thread application:
+
+  Access violation at address 7629EAAA in module 'gdi32full.dll'. Read of address 0000008C
+   at gdi32full.dll: METALINK::pmetalinkNext + 0x1A
+   at gdi32full.dll: vFreeMHE + 0x3719F
+   at gdi32full.dll: vFreeMDC + 0xAD
+   at gdi32full.dll: UnassociateEnhMetaFile + 0x142
+   at gdi32full.dll: MFP_InternalEndPage + 0xD8
+   at gdi32full.dll: InternalEndPage + 0x74
+   at gdi32full.dll: EndPageImpl + 0x10
+   at GDI32.dll: EndPage + 0x3E
+   at Test.exe: TPrinterEx.EndDoc in PrintersEx.pas (Line 578)
+
+  Canvas.Refresh will set the TCanvas object to a state of "no objects are selected into the DC". RestoreDC() will then
+  select the objects from SaveDC() back into the DC. Now, when the properties of p.Canvas.Font (or .Pen or .Brush) are
+  changed, TCanvas.FontChanged() is called but will *not* deselect the font handle from the DC, and then the font handle
+  is destroyed while being still selected into the DC.
+  As this kinds of Delphi objects are pooled und shared across TCanvas instances, this error may affect a multi-threaded
+  applications with a much higher probability.
+  (About the example: As there is no reliable way to resync TCanvas with the state of the DC, it is best to avoid SaveDC
+   + RestoreDC in the first place.)
+
+
+
+  See also:
+
+  "What is the correct way of using SaveDC and RestoreDC?"
+	https://devblogs.microsoft.com/oldnewthing/20170920-00/?p=97055
+
+  "Thread affinity of user interface objects, part 2: Device contexts"
+	https://devblogs.microsoft.com/oldnewthing/20051011-10/?p=33823
+
+  "Thread affinity of user interface objects, part 4: GDI objects and other notes on affinity"
+	https://devblogs.microsoft.com/oldnewthing/20051013-11/?p=33783
+
+  "What are the dire consequences of not selecting objects out of my DC?"
+	"https://devblogs.microsoft.com/oldnewthing/20130306-00/?p=5043
 }
 
 {$include LibOptions.inc}
@@ -174,6 +228,7 @@ type
 	procedure DeleteDC;
 	function GetOptions(CapNames, CapIDs, LenName, LenID: uint16): TPrinterOptions;
 	procedure CheckCapability(Capability: TPrinterCapability);
+	function EndPage: boolean;
 
 	// Property support:
 	function GetCollate: boolean;
@@ -197,8 +252,8 @@ type
 	destructor Destroy; override;
 	procedure Abort;
 	procedure BeginDoc(const JobName: string; const OutputFilename: string = '');
-	procedure EndDoc;
-	procedure NewPage;
+	function EndDoc: boolean;
+	function NewPage: boolean;
 	procedure SetMapMode(MapMode: byte);
 
 	property Name: string read FName;
@@ -271,28 +326,6 @@ function _GetDefaultPrinter(DefaultPrinter: PChar; var I: DWORD): BOOL; stdcall;
  external WinSpool.winspl name {$ifdef UNICODE}'GetDefaultPrinterW'{$else}'GetDefaultPrinterA'{$endif};
 
 
-// Workaround for a multi-threading bug in gdi32full.dll, version 10.0.19041.3803, at least for 32bit processes:
-//
-// Printing multiple jobs in parallel from multiple threads to the same printer causes an access violation in GDI,
-// if ResetDC() is used in TPrinterEx.NewPage. The exception occurs in some job which has never called ResetDC (prints
-// only one page), if another job is printing multiple pages and thus is calling ResetDC().
-// When the access violation happens, some critical section is still owned by the thread in which it occured,
-// preventing any further printing.
-//
-// Access violation at address 7629EAAA in module 'gdi32full.dll'. Read of address 0000008C
-//  at gdi32full.dll: METALINK::pmetalinkNext + 0x1A
-//  at gdi32full.dll: vFreeMHE + 0x3719F
-//  at gdi32full.dll: vFreeMDC + 0xAD
-//  at gdi32full.dll: UnassociateEnhMetaFile + 0x142
-//  at gdi32full.dll: MFP_InternalEndPage + 0xD8
-//  at gdi32full.dll: InternalEndPage + 0x74
-//  at gdi32full.dll: EndPageImpl + 0x10
-//  at GDI32.dll: EndPage + 0x3E
-//  at Test.exe: TPrinterEx.EndDoc in PrintersEx.pas (Line 578)
-var
-  Lock: TSlimRWLock;
-
-
 procedure RaiseError(const Msg: string);
 begin
   raise EPrinter.Create(Msg);
@@ -363,7 +396,7 @@ end;
  //===================================================================================================================
 procedure TPrinterCanvas.Changing;
 begin
-  // allow Canvas only to be used when there is a print job:
+  // allow Canvas to be used only when there is a print job:
   FPrinter.CheckPrinting(true);
   inherited;
 end;
@@ -603,25 +636,35 @@ end;
 
 
  //===================================================================================================================
- // Finishes the last page and also the printjob.
+ // Internal: Finishes the current page. Returns false, if the Windows print job was cancelled by some outside action.
  //===================================================================================================================
-procedure TPrinterEx.EndDoc;
+function TPrinterEx.EndPage: boolean;
+begin
+  Result := Windows.EndPage(FDC) > 0;
+  if not Result then
+	// job was cancelled by another program, like Windows' Print Queue GUI:
+	self.Abort;
+end;
+
+
+ //===================================================================================================================
+ // Finishes the last page and also the printjob. Returns false, if the Windows print job was cancelled by some action
+ // outside of this object.
+ //===================================================================================================================
+function TPrinterEx.EndDoc: boolean;
 begin
   self.CheckPrinting(true);
   try
 	Assert(FDC <> 0);
 	FCanvas.Handle := 0;
 
-	Lock.AcquireExclusive;
-	try
-	  Win32Check(Windows.EndPage(FDC) > 0);
-	finally
-	  Lock.ReleaseExclusive;
-	end;
+	if not self.EndPage then
+	  exit(false);
 
 	Win32Check(Windows.EndDoc(FDC) > 0);
 
 	FState := psIdle;
+	Result := true;
   except
 	self.Abort;
 	raise;
@@ -652,37 +695,36 @@ end;
  // Finishes the current page and starts a new one.
  // This also applies in-between changes of various properties, like paper orientation, paper size, paper source,
  // number of copies to be printed, duplex mode, and so on.
+ // Returns false, if the Windows print job was cancelled by some action outside of this object.
  //===================================================================================================================
-procedure TPrinterEx.NewPage;
+function TPrinterEx.NewPage: boolean;
 begin
   self.CheckPrinting(true);
 
-  // after ResetDC, the DC can have different properties, so unassociate FCanvas from it:
+  // after ResetDC, the DC may have different properties, so unassociate FCanvas from it:
   FCanvas.Handle := 0;
 
-  Lock.AcquireExclusive;
-  try
-	Win32Check(Windows.EndPage(FDC) > 0);
+  if not self.EndPage then
+	exit(false);
 
-	// apply current settings to the DC:
-	// ResetDC() resets the mapping mode (SetMapMode + SetViewportExtEx + SetWindowExtEx) and the world transformation
-	// (SetWorldTransform), the origins (SetViewportOrgEx + SetWindowOrgEx + SetBrushOrgEx), maybe also the graphics mode
-	// (SetGraphicsMode):
-	// According to https://referencesource.microsoft.com/#System.Drawing/commonui/System/Drawing/Printing/DefaultPrintController.cs
-	// and the docs, ResetDC() always returns the same handle as given.
-	Win32Check( Windows.ResetDC(FDC, FDevMode^) <> 0);
-	FDevModeChanged := false;
-  finally
-	Lock.ReleaseExclusive;
-  end;
+  // apply current settings to the DC:
+  // ResetDC() resets the mapping mode (SetMapMode + SetViewportExtEx + SetWindowExtEx) and the world transformation
+  // (SetWorldTransform), the origins (SetViewportOrgEx + SetWindowOrgEx + SetBrushOrgEx), maybe also the graphics mode
+  // (SetGraphicsMode):
+  // According to https://referencesource.microsoft.com/#System.Drawing/commonui/System/Drawing/Printing/DefaultPrintController.cs
+  // and the docs, ResetDC() always returns the same handle as given.
+  Win32Check( Windows.ResetDC(FDC, FDevMode^) <> 0);
+  FDevModeChanged := false;
 
-  // ResetDC might have altered the page orientation:
+  // ResetDC might have altered the page orientation, and therefore the DPI of the Y axis:
   FUnitsPerInch := self.GetDPI.cy;
 
   Win32Check(Windows.StartPage(FDC) > 0);
   Inc(FPageNumber);
 
-  //Assert((FCanvas.PenPos.X = 0) and (FCanvas.PenPos.Y = 0));
+  FCanvas.MoveTo(0, 0);
+
+  Result := true;
 end;
 
 
