@@ -11,6 +11,7 @@ unit PrintersEx;
   - Correct handling of dialog cancellation during print-to-file / print-to-PDF.
   - No use of obsolete Win95-like constructs like GlobalAlloc or GetPrinter/SetPrinter with Device+Port+Driver.
   - Offers more printers settings to query and select, like paper formats and paper sources (aka "bins").
+  - Retrieves the Windows print job ID.
   - Allows to select custom paper sizes (support depends on the printer driver, as for all other settings).
   - Allows changing of page properties from page to page inside a print job (for example, the orientation).
   - Allows print-to-file by the application.
@@ -75,7 +76,7 @@ unit PrintersEx;
   - Call TPrinterEx.SetMapMode() as the first action on each page to specify the "logical unit" that will subsequently
 	be used for all dimensions and coordinates.
   - Specify TPen.Width, TFont.Height and all extents and coordinates in the selected logical unit.
-  - TCanvase.TextWidth and the like will correctly use the logical unit set by SetMapMode().
+  - TCanvas.TextWidth and the like will correctly use the logical unit set by SetMapMode().
   - For extra precision, use TFont.Height instead of TFont.Size, as this will prevent some rounding error due to .Size
 	using a unit of measure of 1/72 inch.
   - If you create TFont objects, set TFont.PixelPerInch to TPrinterEx.UnitsPerInch together with TFont.Height: This will
@@ -144,11 +145,54 @@ interface
 uses
   Types,
   Windows,
+  WinSpool,
   SysUtils,
   Graphics;
 
+const
+{$if declared(JOB_CONTROL_RETAIN)}
+	JOB_CONTROL_RETAIN         = WinSpool.JOB_CONTROL_RETAIN;
+	JOB_CONTROL_RELEASE        = WinSpool.JOB_CONTROL_RELEASE;
+{$else}
+	JOB_CONTROL_RETAIN         = 8;
+	JOB_CONTROL_RELEASE        = 9;
+{$ifend}
+
 type
   EPrinter = class(Exception);
+
+  // Defines operations for a print job.
+  // https://learn.microsoft.com/en-us/windows/win32/printdocs/setjob
+  TPrintJobCmd = (
+	pjcPause   = WinSpool.JOB_CONTROL_PAUSE,	// Pause the print job.
+	pjcRestart = WinSpool.JOB_CONTROL_RESTART,	// Restart the print job. A job can only be restarted if it was printing.
+	pjcResume  = WinSpool.JOB_CONTROL_RESUME,	// Resume a paused print job.
+	pjcDelete  = WinSpool.JOB_CONTROL_DELETE,	// Delete the print job.
+	pjcRetain  = JOB_CONTROL_RETAIN,			// Windows Vista and later: Keep the job in the queue after it prints.
+	pjcRelease = JOB_CONTROL_RELEASE			// Windows Vista and later: Release the print job.
+  );
+
+  // Current state of a print job.
+  // https://learn.microsoft.com/en-us/windows/win32/printdocs/job-info-1
+  TPrintJobStatusFlag = (
+	pjsPaused,									// Job is paused.
+	pjsError,									// An error is associated with the job.
+	pjsDeleting,								// Job is being deleted.
+	pjsSpooling,								// Job is spooling.
+	pjsPrinting,								// Job is printing.
+	pjsOffline,									// Printer is offline.
+	pjsPaperout,								// Printer is out of paper.
+	pjsPrinted,									// Job has printed.
+	pjsDeleted,									// Job has been deleted.
+	pjsBlocked,									// The driver cannot print the job.
+	pjsIntervention,							// Printer has an error that requires the user to do something.
+	pjsRestart,									// Job has been restarted.
+	pjsComplete,								// Windows XP and later: Job is sent to the printer, but the job may not be printed yet.
+	pjsRetained									// Windows Vista and later: Job has been retained in the print queue and cannot be deleted. Due to:
+												// 1) The job was manually retained by a call to SetJob and the spooler is waiting for the job to be released.
+												// 2) The job has not finished printing and must finish printing before it can be automatically deleted.
+  );
+  TPrintJobStatus = set of TPrintJobStatusFlag;
 
   // Defines things the printer can support. Note that it is entirely up to the printer driver which capability is
   // claimed as being supported. For example, support for duplexing may be reported even when this only works by
@@ -218,6 +262,7 @@ type
 	FUnitsPerInch: integer;
 	FDC: HDC;
 	FDevModeChanged: boolean;
+	FJobID: uint32;
 
 	FPageNumber: integer;
 	FState: TState;
@@ -251,7 +296,7 @@ type
 	constructor Create(const Name: string);
 	destructor Destroy; override;
 	procedure Abort;
-	procedure BeginDoc(const JobName: string; const OutputFilename: string = '');
+	function BeginDoc(const JobName: string; const OutputFilename: string = ''): boolean;
 	function EndDoc: boolean;
 	function NewPage: boolean;
 	procedure SetMapMode(MapMode: byte);
@@ -263,6 +308,7 @@ type
 	property Collate: boolean read GetCollate write SetCollate;
 	property Copies: uint16 read GetNumCopies write SetNumCopies;
 	property Duplex: TPrinterDuplexing read GetDuplex write SetDuplex;
+	property JobID: uint32 read FJobID;
 	property Orientation: TPrinterOrientation read GetOrientation write SetOrientation;
 	property PageNumber: integer read FPageNumber;
 	property Printing: boolean index psPrinting read GetState;
@@ -296,6 +342,9 @@ type
 	class function PrinterExists(const Name: string): boolean; static;
 	class function GetPrinters: TStringDynArray; static;
 	class function GetDefaultPrinter: string; static;
+
+	class function SetJob(const PrinterName: string; JobID: uint32; Cmd: TPrintJobCmd): boolean; static;
+	class function GetJobStatus(const PrinterName: string; JobID: uint32; out Status: TPrintJobStatus): boolean;
   end;
 
 
@@ -304,9 +353,26 @@ implementation
 {############################################################################}
 
 uses
-  Consts,
-  WinSpool,
-  WinSlimLock;
+  Consts;
+
+const
+  JOB_STATUS_COMPLETE = $00001000;
+  JOB_STATUS_RETAINED = $00002000;
+
+{$if 1 shl ord(pjsPaused)   <> JOB_STATUS_PAUSED}   {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsError)    <> JOB_STATUS_ERROR}    {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsDeleting) <> JOB_STATUS_DELETING} {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsSpooling) <> JOB_STATUS_SPOOLING} {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsPrinting) <> JOB_STATUS_PRINTING} {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsOffline)  <> JOB_STATUS_OFFLINE}  {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsPaperout) <> JOB_STATUS_PAPEROUT} {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsPrinted)  <> JOB_STATUS_PRINTED}  {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsDeleted)  <> JOB_STATUS_DELETED}  {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsBlocked)  <> JOB_STATUS_BLOCKED_DEVQ} {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsIntervention) <> JOB_STATUS_USER_INTERVENTION} {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsRestart)  <> JOB_STATUS_RESTART}  {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsComplete) <> JOB_STATUS_COMPLETE} {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
+{$if 1 shl ord(pjsRetained) <> JOB_STATUS_RETAINED} {$message error 'TPrintJobStatusFlag is wrong'} {$ifend}
 
 type
   TFontEnum = record
@@ -576,15 +642,18 @@ end;
  //===================================================================================================================
  // Starts a print job <JobName> at the printer, optionally redirecting the output to <OutputFilename>.
  // If the printer opens some dialog at this point (for example, 'Microsoft Print to PDF' will do this) and this
- // dialog is cancelled by the user, an EAbort exception is thrown.
+ // dialog is cancelled by the user, false is returned.
+ // Returns false, if the Windows print job was cancelled by some action outside of this object.
  //===================================================================================================================
-procedure TPrinterEx.BeginDoc(const JobName: string; const OutputFilename: string = '');
+function TPrinterEx.BeginDoc(const JobName: string; const OutputFilename: string = ''): boolean;
 var
   DocInfo: Windows.TDocInfo;
+  JobID: integer;
   ActiveWnd: HWND;
   Reenable: boolean;
 begin
   self.CheckPrinting(false);
+  FJobID := 0;
   // always start with a fresh DC:
   if FDC <> 0 then self.DeleteDC;
 
@@ -614,11 +683,14 @@ begin
 
 	// for Print-To-Pdf (or Print-to-File for normal printers), StartDoc() shows a dialog which the user can cancel
 	// => handle the error:
-	if Windows.StartDoc(FDC, DocInfo) <= 0 then begin
-	  // if the dialog was not cancelled by the user, throw a normal exception:
+	JobID := Windows.StartDoc(FDC, DocInfo);
+	if JobID <= 0 then begin
+	  // if the dialog was not cancelled by the user, throw an exception:
 	  Win32Check(Windows.GetLastError = ERROR_CANCELLED);
-	  SysUtils.Abort;
+	  FState := psAborted;
+	  exit(false);
 	end;
+	FJobID := JobID;
   finally
 	if Reenable then Windows.EnableWindow(ActiveWnd, true);
 	if ActiveWnd <> 0 then Windows.SetActiveWindow(ActiveWnd);
@@ -632,6 +704,7 @@ begin
   FPageNumber := 1;
 
   Win32Check(Windows.StartPage(FDC) > 0);
+  Result := true;
 end;
 
 
@@ -641,8 +714,9 @@ end;
 function TPrinterEx.EndPage: boolean;
 begin
   Result := Windows.EndPage(FDC) > 0;
+  // false => job was cancelled by another program like Windows' Print Queue GUI, using
+  // Windows.SetJob(, JOB_CONTROL_DELETE) or Windows.SetPrinter(, PRINTER_CONTROL_PURGE):
   if not Result then
-	// job was cancelled by another program, like Windows' Print Queue GUI:
 	self.Abort;
 end;
 
@@ -693,7 +767,7 @@ end;
 
  //===================================================================================================================
  // Finishes the current page and starts a new one.
- // This also applies in-between changes of various properties, like paper orientation, paper size, paper source,
+ // Applies in-between changes of various properties, like paper orientation, paper size, paper source,
  // number of copies to be printed, duplex mode, and so on.
  // Returns false, if the Windows print job was cancelled by some action outside of this object.
  //===================================================================================================================
@@ -1244,7 +1318,6 @@ type
   end;
 
 var
-  hPrinter: THandle;
   CountNames: integer;
   CountIDs: integer;
   Names: array of char;
@@ -1253,37 +1326,30 @@ var
   PStr: PChar;
   PID: PByte;
 begin
-  Win32Check( WinSpool.OpenPrinter(PChar(FName), hPrinter, nil) );
-  try
+  // Retrieve the names:
 
-	// Retrieve the names:
+  CountNames := WinSpool.DeviceCapabilities(pointer(FName), nil, CapNames, nil, FDevMode);
+  // <CapNames> may be unsupported or return zero items. There is no way to distingush this (and no need to to this
+  // anyway):
+  if CountNames <= 0 then
+	exit(nil);
 
-	CountNames := WinSpool.DeviceCapabilities(pointer(FName), nil, CapNames, nil, FDevMode);
-	// <CapNames> may be unsupported or return zero items. There is no way to distingush this (and no need to to this
-	// anyway):
-	if CountNames <= 0 then
-	  exit(nil);
+  System.SetLength(Names, CountNames * LenName);
+  Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, CapNames, pointer(Names), FDevMode) >= 0);
 
-	System.SetLength(Names, CountNames * LenName);
-	Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, CapNames, pointer(Names), FDevMode) >= 0);
+  // Retrieve the IDs:
 
-	// Retrieve the IDs:
+  CountIDs := WinSpool.DeviceCapabilities(pointer(FName), nil, CapIDs, nil, FDevMode);
+  // DC_BINS may be unsupported:
+  if CountIDs < 0 then
+	exit(nil);
 
-	CountIDs := WinSpool.DeviceCapabilities(pointer(FName), nil, CapIDs, nil, FDevMode);
-	// DC_BINS may be unsupported:
-	if CountIDs < 0 then
-	  exit(nil);
+  // both lists must match, otherwise its unclear which ID belongs to which name:
+  if CountIDs <> CountNames then
+	RaiseError('DeviceCapabilities() returned wrong value');
 
-	// both lists must match, otherwise its unclear which ID belongs to which name:
-	if CountIDs <> CountNames then
-	  RaiseError('DeviceCapabilities() returned wrong value');
-
-	System.SetLength(IDs, CountIDs * LenID);
-	Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, CapIDs, pointer(IDs), FDevMode) >= 0);
-
-  finally
-	WinSpool.ClosePrinter(hPrinter);
-  end;
+  System.SetLength(IDs, CountIDs * LenID);
+  Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, CapIDs, pointer(IDs), FDevMode) >= 0);
 
   // combine names and IDs in the result:
 
@@ -1381,9 +1447,81 @@ end;
 
 
  //===================================================================================================================
+ // Sends the given command for the Windows print job to the spooler.
+ // Throws an exception if <PrinterName> is invalid.
+ // Returns true, if a job <JobID> was found at the printer <PrinterName> and <Cmd> was accepted by the spooler.
+ // Returns false, when no job was found.
+ //
+ // Note:
+ // The application must have the required permissions (for example, the job might belong to another user).
+ // Also, the job might already be finisihed and therefore no longer known to the spooler.
+ //===================================================================================================================
+class function TPrinterEx.SetJob(const PrinterName: string; JobID: uint32; Cmd: TPrintJobCmd): boolean;
+var
+  hPrinter: THandle;
+begin
+  Win32Check( WinSpool.OpenPrinter(PChar(PrinterName), hPrinter, nil) );
+  try
+	if not WinSpool.SetJob(hPrinter, JobID, 0, nil, ord(Cmd)) then begin
+	  // => ERROR_INVALID_PARAMETER for unknown JobID:
+	  Win32Check(Windows.GetLastError = ERROR_INVALID_PARAMETER);
+	  exit(false);
+	end;
+  finally
+	WinSpool.ClosePrinter(hPrinter);
+  end;
+  Result := true;
+end;
+
+
+ //===================================================================================================================
+ // Throws an exception if <PrinterName> is invalid.
+ // Returns true, if a job <JobID> was found at the printer <PrinterName> and <Status> is set.
+ // Returns false, when no job was found.
+ // An empty set indicates that the job is completely stored in the spooler, but the print queue is paused (therefore,
+ // no attempt was made so far by the spooler to send the job to the printer).
+ //===================================================================================================================
+class function TPrinterEx.GetJobStatus(const PrinterName: string; JobID: uint32; out Status: TPrintJobStatus): boolean;
+var
+  hPrinter: THandle;
+  Info: WinSpool.PJobInfo1;
+  Bytes: DWORD;
+begin
+  Win32Check( WinSpool.OpenPrinter(PChar(PrinterName), hPrinter, nil) );
+  try
+
+	Bytes := 1024;
+	repeat
+
+	  GetMem(Info, Bytes);
+	  try
+		if not WinSpool.GetJob(hPrinter, JobID, 1, Info, Bytes, @Bytes) then begin
+		  case Windows.GetLastError of
+		  ERROR_INVALID_PARAMETER:   exit(false);
+		  ERROR_INSUFFICIENT_BUFFER: continue;
+		  else                       Win32Check(false);
+		  end;
+		end;
+
+		Status := TPrintJobStatus(uint16(Info.Status));
+		exit(true);
+	  finally
+		FreeMem(Info);
+	  end;
+
+	until false;
+
+  finally
+	WinSpool.ClosePrinter(hPrinter);
+  end;
+end;
+
+
+ //===================================================================================================================
  //===================================================================================================================
 procedure UnitTest;
 const
+  Printer = 'Microsoft Print to PDF';
   Page1 = 'Page 1';
   Page2 = 'Page 2';
 var
@@ -1393,13 +1531,17 @@ var
   Options: TPrinterOptions;
   Fonts: TFontDynArray;
   f: TFont;
+  Status: TPrintJobStatus;
 begin
 try
   TPrinterEx.GetDefaultPrinter;
 
   Assert(not TPrinterEx.PrinterExists('blabla'));
 
-  p := TPrinterEx.Create('Microsoft Print to PDF');
+  Assert(not TPrinterEx.SetJob(Printer, 123456, pjcPause) );
+  Assert(not TPrinterEx.GetJobStatus(Printer, 123456, Status));
+
+  p := TPrinterEx.Create(Printer);
 
   p.GetDPI;
 
@@ -1484,11 +1626,18 @@ try
   p.Canvas.Rectangle(1000, 2000, 1000 + p.Canvas.TextWidth(Page2), 2000 + p.Canvas.TextHeight(Page2));
   p.Canvas.TextOut(1000, 2000, Page2);
 
+  Assert(TPrinterEx.GetJobStatus(p.Name, p.JobID, Status) and (pjsSpooling in Status));
+
+  Assert(TPrinterEx.SetJob(p.Name, p.JobID, pjcDelete) );
+
+  Assert(TPrinterEx.GetJobStatus(p.Name, p.JobID, Status) and (pjsDeleting in Status));
+
   p.EndDoc;
 
   p.Destroy;
 
   Strings := TPrinterEx.GetPrinters;
+
 except
   Windows.DebugBreak;
 end;
