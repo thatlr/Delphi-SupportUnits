@@ -84,6 +84,21 @@ unit PrintersEx;
 	printer's logical unit.
 
 
+  Unsafe printer drivers
+
+  There are printer drivers which are not thread-safe, somehow: This is surprising because 64-bit printer drivers are
+  not loaded into a 32-bit process at all, and Windows uses "splwow64.exe" as a bridge from the 32bit app to the 64bit
+  spooler and the driver. Also, the "driver isolation" feature (when activated) should shield even the spooler from
+  misbehaving drivers.
+  However, when used by multiple threads in parallel, the Microsoft PostScript printer driver in Windows 10 (PS5UI.DLL,
+  version 0.3.19041.3693) causes access violations during the GDI call SelectObject() for fonts. The Windows Application
+  Verifier detect the use of null handles at a call to KERNELBASE.MapViewOfFile by gdi32full.dll.
+  (https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/application-verifier)
+  On the other hand, the driver "HP Universal Printing PCL 6 (v6.4.1)" just works.
+  To exclude the TCanvas implementation as a source of the error, a test with memory device contexts shows no failure.
+  There seems to be some bug in the Windows GDI printing support which is really unsatisfactory.
+
+
   SaveDC/RestoreDC/GDI objects
 
   If you use SaveDC/RestoreDC, or if you manually select objects into the DC by Windows.SelectObject(), you must make
@@ -446,13 +461,17 @@ end;
 
  //===================================================================================================================
  // should be called by TCanvas only once per page:
+ // Should not cause the resources (Font, Pen, Brush) to be selected into the canvas at this point. This happens
+ // afterwards in TCanvas.RequiredState() when requested.
  //===================================================================================================================
 procedure TPrinterCanvas.CreateHandle;
 begin
   Assert(FPrinter.DC <> 0);
-  self.Handle := FPrinter.DC;
-  // update self.Font.PixelPerInch:
+  Assert(not self.HandleAllocated);
+  // .Font is not selected into the DC, so modifying Font.Height does not affect this TCanvas. It only causes the font
+  // object to refer to a different shared font resource.
   self.UpdateFont;
+  self.Handle := FPrinter.DC;
 end;
 
 
@@ -603,13 +622,14 @@ begin
 	// Note: At this pount, you could modify <w> to scale one or both axis.
 
 	// re-adjust the Y axis orientation back to top-down, as in MM_TEXT:
-	Windows.SetMapMode(FDC, MM_ANISOTROPIC);
+	Win32Check(Windows.SetMapMode(FDC, MM_ANISOTROPIC) <> 0);
 	Win32Check(Windows.SetWindowExtEx(FDC, w.cx, w.cy, nil));
 	Win32Check(Windows.SetViewPortExtEx(FDC, v.cx, -v.cy, nil));
   end;
 
   // deselect the font from the DC:
   FCanvas.Refresh;
+
   // Force FCanvas.Font.PixelsPerInch to match FUnitsPerInch (FCanvas is only allocated once + the VCL seems to expect
   // TCanvas.Font.PixelsPerInch to be the resolution of the device context).
   // TCanvas.Font.PixelsPerInch is used when a font is assigned to the canvas: If source and target font have different
@@ -665,7 +685,7 @@ begin
   // the active window instead of the active window itself). To mitigate this error, we
   // => prevent clicking the still active window
   // => restore the Active state afterwards, as it is wrongly restored by the file selection dialog
-  if Windows.GetCurrentThreadID = System.MainThreadID then begin
+  if not System.IsConsole and (Windows.GetCurrentThreadID = System.MainThreadID) then begin
 	// only for the GUI thread, not for other threads:
 	ActiveWnd := Windows.GetActiveWindow;
 	Reenable := (ActiveWnd <> 0) and not Windows.EnableWindow(ActiveWnd, false);
