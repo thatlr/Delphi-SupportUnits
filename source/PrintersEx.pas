@@ -600,16 +600,6 @@ var
 begin
   self.CheckPrinting(true);
 
-  case MapMode of
-  MM_TEXT:      FUnitsPerInch := self.GetDPI.cy;
-  MM_LOMETRIC:  FUnitsPerInch := 254;
-  MM_HIMETRIC:  FUnitsPerInch := 2540;
-  MM_LOENGLISH: FUnitsPerInch := 100;
-  MM_HIENGLISH: FUnitsPerInch := 1000;
-  MM_TWIPS:     FUnitsPerInch := 1440;
-  else          RaiseInvalidParamError;
-  end;
-
   // only GM_ADVANCED supports font scaling for both the X and Y axes independently (see note below):
   Win32Check(Windows.SetGraphicsMode(FDC, GM_ADVANCED) <> 0);
   Win32Check(Windows.SetMapMode(FDC, MapMode) <> 0);
@@ -627,8 +617,15 @@ begin
 	Win32Check(Windows.SetViewPortExtEx(FDC, v.cx, -v.cy, nil));
   end;
 
-  // deselect the font from the DC:
-  FCanvas.Refresh;
+  case MapMode of
+  MM_TEXT:      FUnitsPerInch := self.GetDPI.cy;
+  MM_LOMETRIC:  FUnitsPerInch := 254;
+  MM_HIMETRIC:  FUnitsPerInch := 2540;
+  MM_LOENGLISH: FUnitsPerInch := 100;
+  MM_HIENGLISH: FUnitsPerInch := 1000;
+  MM_TWIPS:     FUnitsPerInch := 1440;
+  else          RaiseInvalidParamError;
+  end;
 
   // Force FCanvas.Font.PixelsPerInch to match FUnitsPerInch (FCanvas is only allocated once + the VCL seems to expect
   // TCanvas.Font.PixelsPerInch to be the resolution of the device context).
@@ -812,6 +809,7 @@ begin
 
   // ResetDC might have altered the page orientation, and therefore the DPI of the Y axis:
   FUnitsPerInch := self.GetDPI.cy;
+  TPrinterCanvas(FCanvas).UpdateFont;
 
   Win32Check(Windows.StartPage(FDC) > 0);
   Inc(FPageNumber);
@@ -1540,6 +1538,11 @@ end;
  //===================================================================================================================
  //===================================================================================================================
 procedure UnitTest;
+
+  procedure _SuppressHint(var Dummy);
+  begin
+  end;
+
 const
   Printer = 'Microsoft Print to PDF';
   Page1 = 'Page 1';
@@ -1553,6 +1556,8 @@ var
   f: TFont;
   Status: TPrintJobStatus;
 begin
+  _SuppressHint(Status);
+
 try
   TPrinterEx.GetDefaultPrinter;
 
