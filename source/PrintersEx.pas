@@ -519,6 +519,7 @@ end;
 
  //===================================================================================================================
  // <Name> may be the name of a local printer or the UNC name of a shared printer in the form \\server\printername.
+ // For an invalid name, an EOSError exception with ERROR_INVALID_PRINTER_NAME is raised.
  //===================================================================================================================
 constructor TPrinterEx.Create(const Name: string);
 begin
@@ -568,7 +569,7 @@ begin
 	FDevModeChanged := false;
   end
   else if FDevModeChanged and (FState <> psPrinting) then begin
-	Win32Check( Windows.ResetDC(FDC, FDevMode^) <> 0);
+	Win32Check(Windows.ResetDC(FDC, FDevMode^) <> 0);
 	FDevModeChanged := false;
   end;
 end;
@@ -581,7 +582,7 @@ procedure TPrinterEx.DeleteDC;
 begin
   Assert(FDC <> 0);
   FCanvas.Handle := 0;
-  Win32Check( Windows.DeleteDC(FDC) );
+  Win32Check(Windows.DeleteDC(FDC) );
   FDC := 0;
 end;
 
@@ -674,6 +675,7 @@ begin
   // always start with a fresh DC:
   if FDC <> 0 then self.DeleteDC;
 
+  // printer may have been deleted by now:
   FDC := Windows.CreateDC(nil, PChar(FName), nil, FDevMode);
   Win32Check(FDC <> 0);
   FDevModeChanged := false;
@@ -804,7 +806,7 @@ begin
   // (SetGraphicsMode):
   // According to https://referencesource.microsoft.com/#System.Drawing/commonui/System/Drawing/Printing/DefaultPrintController.cs
   // and the docs, ResetDC() always returns the same handle as given.
-  Win32Check( Windows.ResetDC(FDC, FDevMode^) <> 0);
+  Win32Check(Windows.ResetDC(FDC, FDevMode^) <> 0);
   FDevModeChanged := false;
 
   // ResetDC might have altered the page orientation, and therefore the DPI of the Y axis:
@@ -832,6 +834,7 @@ end;
 procedure TPrinterEx.SetDevMode(Value: PDeviceMode);
 var
   Size: integer;
+  Err: DWORD;
 begin
   // allocate FDevMode only once:
   if FDevMode = nil then begin
@@ -840,11 +843,16 @@ begin
 	//   https://referencesource.microsoft.com/#System.Drawing/commonui/System/Drawing/Printing/PrinterSettings.cs
 	// we dont need a printer handle for DocumentProperties().
 	Size := WinSpool.DocumentProperties(0, 0, PChar(FName), nil, nil, 0);
-	Win32Check(Size >= 0);
+	if Size < 0 then begin
+	  // means printer is not accessible (wrong name, no access rights, deleted meanwhile):
+	  Err := Windows.GetLastError;
+	  if Err = ERROR_INVALID_HANDLE then Err := ERROR_INVALID_PRINTER_NAME;
+	  RaiseLastOSError(integer(Err));
+	end;
 
 	GetMem(FDevMode, Size);
 	try
-	  Win32Check( WinSpool.DocumentProperties(0, 0, PChar(FName), FDevMode, nil, DM_OUT_BUFFER) >= 0)
+	  Win32Check(WinSpool.DocumentProperties(0, 0, PChar(FName), FDevMode, nil, DM_OUT_BUFFER) >= 0)
 	except
 	  FreeMem(FDevMode);
 	  FDevMode := nil;
@@ -876,9 +884,9 @@ begin
 
   if Value <> nil then begin
 	// basic validation of the given DEVMODE structure:
-	Win32Check( _IsValidDevmode(Value, Value.dmSize + Value.dmDriverExtra) );
+	Win32Check(_IsValidDevmode(Value, Value.dmSize + Value.dmDriverExtra) );
 	// merge settings from <Value> with the current settings in FDevMode:
-	Win32Check( WinSpool.DocumentProperties(0, 0, PChar(FName), FDevMode, Value, DM_IN_BUFFER or DM_OUT_BUFFER) >= 0);
+	Win32Check(WinSpool.DocumentProperties(0, 0, PChar(FName), FDevMode, Value, DM_IN_BUFFER or DM_OUT_BUFFER) >= 0);
 	FDevModeChanged := true;
   end;
 end;
@@ -1426,12 +1434,12 @@ var
   PrinterInfo: ^WinSpool.TPrinterInfo4;
 begin
   BufSize := 0;
-  Win32Check( WinSpool.EnumPrinters(Flags, nil, Level, nil, 0, BufSize, NumInfo) or (Windows.GetLastError = ERROR_INSUFFICIENT_BUFFER));
+  Win32Check(WinSpool.EnumPrinters(Flags, nil, Level, nil, 0, BufSize, NumInfo) or (Windows.GetLastError = ERROR_INSUFFICIENT_BUFFER));
   if BufSize = 0 then exit(nil);
 
   GetMem(Buffer, BufSize);
   try
-	Win32Check( WinSpool.EnumPrinters(Flags, nil, Level, Buffer, BufSize, BufSize, NumInfo) );
+	Win32Check(WinSpool.EnumPrinters(Flags, nil, Level, Buffer, BufSize, BufSize, NumInfo) );
 
 	System.SetLength(Result, NumInfo);
 
@@ -1478,7 +1486,7 @@ class function TPrinterEx.SetJob(const PrinterName: string; JobID: uint32; Cmd: 
 var
   hPrinter: THandle;
 begin
-  Win32Check( WinSpool.OpenPrinter(PChar(PrinterName), hPrinter, nil) );
+  Win32Check(WinSpool.OpenPrinter(PChar(PrinterName), hPrinter, nil) );
   try
 	if not WinSpool.SetJob(hPrinter, JobID, 0, nil, ord(Cmd)) then begin
 	  // => ERROR_INVALID_PARAMETER for unknown JobID:
@@ -1505,7 +1513,7 @@ var
   Info: WinSpool.PJobInfo1;
   Bytes: DWORD;
 begin
-  Win32Check( WinSpool.OpenPrinter(PChar(PrinterName), hPrinter, nil) );
+  Win32Check(WinSpool.OpenPrinter(PChar(PrinterName), hPrinter, nil) );
   try
 
 	Bytes := 1024;
@@ -1558,13 +1566,15 @@ var
 begin
   _SuppressHint(Status);
 
-try
   TPrinterEx.GetDefaultPrinter;
 
-  Assert(not TPrinterEx.PrinterExists('blabla'));
+  Assert(not TPrinterEx.PrinterExists('') and (Windows.GetLastError = ERROR_INVALID_PRINTER_NAME));
 
   Assert(not TPrinterEx.SetJob(Printer, 123456, pjcPause) );
   Assert(not TPrinterEx.GetJobStatus(Printer, 123456, Status));
+
+  // will raise an "invalid printer name" exception:
+  // TPrinterEx.Create('');
 
   p := TPrinterEx.Create(Printer);
 
@@ -1662,10 +1672,6 @@ try
   p.Destroy;
 
   Strings := TPrinterEx.GetPrinters;
-
-except
-  Windows.DebugBreak;
-end;
 end;
 
 
