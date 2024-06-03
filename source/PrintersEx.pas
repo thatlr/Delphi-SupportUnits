@@ -314,7 +314,7 @@ type
 	function BeginDoc(const JobName: string; const OutputFilename: string = ''): boolean;
 	function EndDoc: boolean;
 	function NewPage: boolean;
-	procedure SetMapMode(MapMode: byte);
+	procedure SetMapMode(MapMode: byte; IgnorePageMargins: boolean);
 
 	property Name: string read FName;
 	property Aborted: boolean index psAborted read GetState;
@@ -595,7 +595,7 @@ end;
  // For MM_ANISOTROPIC or MM_ISOTROPIC, you need to create your own method.
  // https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-setmapmode
  //===================================================================================================================
-procedure TPrinterEx.SetMapMode(MapMode: byte);
+procedure TPrinterEx.SetMapMode(MapMode: byte; IgnorePageMargins: boolean);
 var
   v, w: TSize;
 begin
@@ -627,6 +627,13 @@ begin
   MM_TWIPS:     FUnitsPerInch := 1440;
   else          RaiseInvalidParamError;
   end;
+
+  if IgnorePageMargins then
+	// map the Canvas coordinate (0,0) to the upper left corner of the physical page (instead to the upper left corner
+	// of the printable area):
+	Windows.SetViewportOrgEx(FDC, -Windows.GetDeviceCaps(FDC, PHYSICALOFFSETX), -Windows.GetDeviceCaps(FDC, PHYSICALOFFSETY), nil)
+  else
+	Windows.SetViewportOrgEx(FDC, 0, 0, nil);
 
   // Force FCanvas.Font.PixelsPerInch to match FUnitsPerInch (FCanvas is only allocated once + the VCL seems to expect
   // TCanvas.Font.PixelsPerInch to be the resolution of the device context).
@@ -703,22 +710,24 @@ begin
 	// for Print-To-Pdf (or Print-to-File for normal printers), StartDoc() shows a dialog which the user can cancel
 	// => handle the error:
 	JobID := Windows.StartDoc(FDC, DocInfo);
+
 	if JobID <= 0 then begin
 	  // if the dialog was not cancelled by the user, throw an exception:
 	  Win32Check(Windows.GetLastError = ERROR_CANCELLED);
 	  FState := psAborted;
 	  exit(false);
 	end;
+
+	// StartDoc() has created a job in the spooler => enable AbortDoc():
 	FJobID := JobID;
+	FState := psPrinting;
+
   finally
 	if Reenable then Windows.EnableWindow(ActiveWnd, true);
 	if ActiveWnd <> 0 then Windows.SetActiveWindow(ActiveWnd);
   end;
 
   //Assert((FCanvas.PenPos.X = 0) and (FCanvas.PenPos.Y = 0));
-
-  // StartDoc() has created a job in the spooler => enable AbortDoc():
-  FState := psPrinting;
 
   FPageNumber := 1;
 
@@ -1223,6 +1232,9 @@ end;
 
  //===================================================================================================================
  // Returns the size of the printable area on the page, in 0.1 mm units.
+ // Note: GDI shifts all coordinates by (PHYSICALOFFSETX, PHYSICALOFFSETY). This causes Canvas position (0,0) to be
+ // the upper left corner of the printable area, not of the physical page. To print something at the same physical
+ // location, one needs to shift everyhing to top-left by the result of GetPageMargins.
  //===================================================================================================================
 function TPrinterEx.GetPrintableArea: TSize;
 begin
@@ -1620,7 +1632,7 @@ begin
   p.BeginDoc('Test', 'C:\TEMP\test.pdf');
 
   // set logical units to 0.01 mm:
-  p.SetMapMode(MM_HIMETRIC);
+  p.SetMapMode(MM_HIMETRIC, false);
   // dont fill background of text:
   p.Canvas.Brush.Style := bsClear;
 
@@ -1638,7 +1650,7 @@ begin
   p.Orientation := poLandscape;
   p.SelectPaperSize(DMPAPER_A5);
   p.NewPage;
-  p.SetMapMode(MM_HIMETRIC);
+  p.SetMapMode(MM_HIMETRIC, false);
 
   // draw text inside a frame:
   p.Canvas.Rectangle(1000, 1000, 1000 + p.Canvas.TextWidth(Page2), 1000 + p.Canvas.TextHeight(Page2));
