@@ -76,8 +76,7 @@ uses
   WinSpool,
   MultiMon,
   SysUtils,
-  Math{,
-  Forms};
+  Math;
 
 function _IsValidDevmode(pDevmode: PDevMode; DevmodeSize: UINT_PTR): BOOL; stdcall;
  external WinSpool.winspl name {$ifdef UNICODE}'IsValidDevmodeW'{$else}'IsValidDevmodeA'{$endif};
