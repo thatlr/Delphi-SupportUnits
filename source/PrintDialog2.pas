@@ -2,6 +2,81 @@ unit PrintDialog2;
 
 {
   TPrintDialog2 - Wrapper for the Windows PrintDlg() function (alternative to VCL's TPrintDialog).
+  
+  Usage example:
+
+	(1) Shows dialog with persisted settings.
+	(2) Print with the selected settings.
+
+	The registry helpers are suppposed to read and write from a key under
+	  HKCU\Software\<YourCompany>\<YourApp>\<self.Name>
+
+	procedure TReportForm.btPrintClick(Sender: TObject);
+	const
+	  RegVal_Printer = 'Printer';
+	  RegVal_PrinterCfg = 'PrinterCfg';
+	var
+	  Dlg: TPrintDialog2;
+	  P: TPrinterEx;
+	begin
+	  ActivateHourglass;
+	  try
+
+		Dlg := TPrintDialog2.Create;
+		try
+		  Dlg.Title := WinUtil.CaptionToString(lblPrint.Caption, lblPrint.ShowAccelChar);
+		  Dlg.Options := [poWarning];
+		  // read the last used printer name from the registry (a string):
+		  Dlg.PrinterName := ReadRegValue(self, RegVal_Printer, '');
+		  // read the last used printer settings from the registry (a TByteDynArray):
+		  Dlg.PrinterCfg := ReadRegValue(self, RegVal_PrinterCfg);
+
+		  if not Dlg.Execute(self) then exit;
+
+		  // force repainting of the area covered by the dialog & restore the wait cursor before
+		  // printer selection (takes time for remote printers):
+		  self.Update;
+		  ReactivateHourglass;
+
+		  WriteRegValue(self, RegVal_Printer, Dlg.PrinterName);
+		  WriteRegValue(self, RegVal_PrinterCfg, Dlg.PrinterCfg);
+
+		  P := TPrinterEx.Create(Dlg.PrinterName);
+		  try
+			P.SetDevMode(Dlg.DevMode);
+			if pcCollation in P.Capabilities then P.Collate := Dlg.Collate;
+			if pcCopies in P.Capabilities then P.Copies := Dlg.Copies;
+
+			if not P.BeginDoc('LabelPrint Bitmap') then exit;
+
+			// P.BeginDoc may have shown a dialog for selecting a target file => 
+			// force repainting of the area covered by the dialog & restore the wait cursor before
+			// the actual printing:
+			self.Update;
+			ReactivateCursor;
+
+			try
+			  self.PrintReport(P, FBitmap);
+			  P.EndDoc;
+			except
+			  P.Abort;
+			  raise;
+			end;
+
+		  finally
+			P.Destroy;
+		  end;
+
+		finally
+		  Dlg.Destroy;
+		end;
+
+
+	  finally
+		DeactivateHourglass;
+	  end;
+	end;
+
 }
 
 {$include LibOptions.inc}
@@ -9,6 +84,7 @@ unit PrintDialog2;
 interface
 
 uses
+  Types,
   Windows,
   CommDlg,
   Controls,
@@ -19,7 +95,7 @@ type
   // * Cannot be placed on a Form at design time.
   // * Does not depend on a specific Delphi printer wrapper.
   //
-  // Note: The properties Copies and Collate have counterparts on the Printer object. If the printer driver suppots it,
+  // Note: The properties Copies and Collate have counterparts on the Printer object. If the printer driver supports it,
   // both functions could be performed by the driver instead of the application. As implemented, the dialog always sets
   // DevMode.dmCopies to 1 and DevMode.dmCollate to 0, and returns the user's choice in its own properties. This leaves
   // it to the application to implement this itself, or to set the printer properties (if the printer driver supports
@@ -30,7 +106,7 @@ type
 	FOptions: Dialogs.TPrintDialogOptions;
 	FPrintRange: Dialogs.TPrintRange;
 
-	FDevMode: PDeviceMode;
+	FDevMode: Windows.PDeviceMode;
 	FData: CommDlg.TPrintDlg;
 
 	procedure FreeDevMode;
@@ -40,16 +116,19 @@ type
 	// property support:
 	function GetPrinterName: string;
 	procedure SetPrinterName(const Value: string);
-	procedure SetDevMode(DevMode: PDeviceMode);
 	function GetCollate: boolean; inline;
 	procedure SetCollate(Value: boolean);
 	function GetPrintToFile: boolean; inline;
+	procedure SetDevMode(DevMode: PDeviceMode);
+	function GetPrinterCfg: TByteDynArray;
+	procedure SetPrinterCfg(const Value: TByteDynArray);
   public
 	destructor Destroy; override;
 	function ExecuteInThread(ParentWnd: HWND): boolean;
 	function Execute(Parent: TControl): boolean;
 
 	property PrinterName: string read GetPrinterName write SetPrinterName;
+	property PrinterCfg: TByteDynArray read GetPrinterCfg write SetPrinterCfg;
 	property DevMode: PDeviceMode read FDevMode write SetDevMode;
 
 	property Collate: boolean read GetCollate write SetCollate;
@@ -76,9 +155,10 @@ uses
   WinSpool,
   MultiMon,
   SysUtils,
+  Forms,
   Math;
 
-function _IsValidDevmode(pDevmode: PDevMode; DevmodeSize: UINT_PTR): BOOL; stdcall;
+function _IsValidDevmode(pDevmode: PDeviceMode; DevmodeSize: UINT_PTR): BOOL; stdcall;
  external WinSpool.winspl name {$ifdef UNICODE}'IsValidDevmodeW'{$else}'IsValidDevmodeA'{$endif};
 
 function DupMem(Ptr: pointer; Size: Integer): pointer;
@@ -138,6 +218,32 @@ begin
 	Win32Check(_IsValidDevmode(DevMode, Size));
 	FDevMode := DupMem(DevMode, Size);
   end;
+end;
+
+
+ //===================================================================================================================
+ //===================================================================================================================
+function TPrintDialog2.GetPrinterCfg: TByteDynArray;
+var
+  Size: DWORD;
+begin
+  Result := nil;
+  if FDevMode <> nil then begin
+	Size := FDevMode.dmSize + FDevMode.dmDriverExtra;
+	System.SetLength(Result, Size);
+	System.Move(FDevMode^, pointer(Result)^, Size);
+  end;
+end;
+
+
+ //===================================================================================================================
+ //===================================================================================================================
+procedure TPrintDialog2.SetPrinterCfg(const Value: TByteDynArray);
+begin
+  if (System.Length(Value) <> 0) and (System.Length(Value) < sizeof(TDeviceMode)) then
+	raise Exception.Create('PrinterCfg: Invalid');
+
+  self.SetDevMode(pointer(Value));
 end;
 
 
@@ -246,6 +352,8 @@ function TPrintDialog2.ExecuteInThread(ParentWnd: HWND): Boolean;
 	finally
 	  Windows.GlobalUnlock(FData.hDevMode);
 	end;
+
+	self.FreeDevMode;
   end;
 
   procedure _UnwrapDevMode;

@@ -400,7 +400,7 @@ type
   end;
 
 
-function _IsValidDevmode(pDevmode: PDevMode; DevmodeSize: UINT_PTR): BOOL; stdcall;
+function _IsValidDevmode(pDevmode: PDeviceMode; DevmodeSize: UINT_PTR): BOOL; stdcall;
  external WinSpool.winspl name {$ifdef UNICODE}'IsValidDevmodeW'{$else}'IsValidDevmodeA'{$endif};
 
 function _GetDefaultPrinter(DefaultPrinter: PChar; var I: DWORD): BOOL; stdcall;
