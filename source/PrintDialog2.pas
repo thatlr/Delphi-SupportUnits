@@ -24,7 +24,7 @@ unit PrintDialog2;
 
 		Dlg := TPrintDialog2.Create;
 		try
-		  Dlg.Title := WinUtil.CaptionToString(lblPrint.Caption, lblPrint.ShowAccelChar);
+		  Dlg.Title := 'Some dialog title';
 		  Dlg.Options := [poWarning];
 		  // read the last used printer name from the registry (a string):
 		  Dlg.PrinterName := ReadRegValue(self, RegVal_Printer, '');
@@ -47,7 +47,7 @@ unit PrintDialog2;
 			if pcCollation in P.Capabilities then P.Collate := Dlg.Collate;
 			if pcCopies in P.Capabilities then P.Copies := Dlg.Copies;
 
-			if not P.BeginDoc('LabelPrint Bitmap') then exit;
+			if not P.BeginDoc('Some print job name') then exit;
 
 			// P.BeginDoc may have shown a dialog for selecting a target file => 
 			// force repainting of the area covered by the dialog & restore the wait cursor before
