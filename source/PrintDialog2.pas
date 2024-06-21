@@ -273,7 +273,7 @@ end;
  //===================================================================================================================
 procedure TPrintDialog2.SetPrinterName(const Value: string);
 var
-  DevNames: ^TDevNames;
+  DevNames: PDevNames;
   Len: uint32;
 begin
   self.FreeGlobal(FData.hDevNames);
@@ -308,7 +308,7 @@ end;
 
 
  //===================================================================================================================
- // Property Collate: Sets the current value to be displayed in the dialog.
+ // Property Collate: Sets the value to be displayed in the dialog.
  //===================================================================================================================
 procedure TPrintDialog2.SetCollate(Value: boolean);
 begin
@@ -332,6 +332,7 @@ end;
  //===================================================================================================================
 function TPrintDialog2.ExecuteInThread(ParentWnd: HWND): Boolean;
 
+  // moves memory block from FDevMode to FData.hDevMode:
   procedure _WrapDevMode;
   var
 	Size: DWORD;
@@ -356,6 +357,7 @@ function TPrintDialog2.ExecuteInThread(ParentWnd: HWND): Boolean;
 	self.FreeDevMode;
   end;
 
+  // moves memory block from FData.hDevMode to FDevMode:
   procedure _UnwrapDevMode;
   var
 	tmp: PDeviceMode;
@@ -369,8 +371,9 @@ function TPrintDialog2.ExecuteInThread(ParentWnd: HWND): Boolean;
 	  FDevMode := DupMem(tmp, tmp.dmSize + tmp.dmDriverExtra);
 	finally
 	  Windows.GlobalUnlock(FData.hDevMode);
-	  self.FreeGlobal(FData.hDevMode);
 	end;
+
+	self.FreeGlobal(FData.hDevMode);
   end;
 
 const
