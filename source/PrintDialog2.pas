@@ -141,7 +141,7 @@ type
 	property PrintToFile: boolean read GetPrintToFile;
 	property PrintRange: TPrintRange read FPrintRange write FPrintRange default prAllPages;
 	property DlgTemplate: PChar read FData.lpPrintTemplateName write FData.lpPrintTemplateName;
-	property DlgTemplageModule: HINST read FData.hInstance write FData.hInstance;
+	property DlgTemplateModule: HINST read FData.hInstance write FData.hInstance;
 	property Title: string read FTitle write FTitle;
   end;
 
