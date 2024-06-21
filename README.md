@@ -27,6 +27,13 @@ Since it is thread-safe and has no global state (no global TPrinter.PrinterIndex
 print jobs, independently and in parallel, even on the same printer.
 
 
+## PrintDialog2
+
+This is an alternative to the VCL's TPrintDialog that does not depend on the VCL's "Printers" unit. It is suitable for programs that
+need to print to multiple printers (with different, independent choices for different printing situations) and that want to store the
+selected printer together with the corresponding settings in the registry or other computer-specific storage.
+
+
 ## ReserveLow2GB
 
 This can be used to test for inappropriate pointer usage, caused by casting a pointer to a (signed) 32bit integer. A pointer above 2GB
