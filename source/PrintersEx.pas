@@ -25,9 +25,13 @@ unit PrintersEx;
 	meaning if the printer driver does not support this concept (for example, receipt printers have no concept of
 	landscape/portrait orientation or paper formats).
 
-  - All device context properties that are not represented by VCL objects are reset for each page: This means that
-	Pen, Brush, Font, CopyMode and TextFlags are retained, but PenPos and everything one can set directly at the GDI
-	Device Context (like Mapping Mode, global transformation) start fresh.
+  - When OptimizeResetDC is not set, all device context properties that are not represented by VCL objects are reset for
+	each page: This means that Pen, Brush, Font, CopyMode and TextFlags are retained, but PenPos and everything one can
+	set directly at the GDI	Device Context (like Mapping Mode, global transformation) start fresh.
+	When OptimizeResetDC is set, this happens only when format settings (like PageOrientation) are changed within a
+	job.
+	Setting OptimizeResetDC could have a positive effect with printer drivers for printers with special features
+	(like dedicated memory for temporarily storing fonts or images).
 
 
   Threading:
@@ -277,6 +281,7 @@ type
 	FUnitsPerInch: integer;
 	FDC: HDC;
 	FDevModeChanged: boolean;
+	FOptimizeResetDC: boolean;
 	FJobID: uint32;
 
 	FPageNumber: integer;
@@ -329,6 +334,7 @@ type
 	property Printing: boolean index psPrinting read GetState;
 	property Scale: uint16 read GetScale write SetScale;
 	property UseColor: boolean read GetColor write SetColor;
+	property OptimizeResetDC: boolean read FOptimizeResetDC write FOptimizeResetDC;
 
 	property UnitsPerInch: integer read FUnitsPerInch write FUnitsPerInch;
 
@@ -809,18 +815,22 @@ begin
   if not self.EndPage then
 	exit(false);
 
-  // apply current settings to the DC:
-  // ResetDC() resets the mapping mode (SetMapMode + SetViewportExtEx + SetWindowExtEx) and the world transformation
-  // (SetWorldTransform), the origins (SetViewportOrgEx + SetWindowOrgEx + SetBrushOrgEx), maybe also the graphics mode
-  // (SetGraphicsMode):
-  // According to https://referencesource.microsoft.com/#System.Drawing/commonui/System/Drawing/Printing/DefaultPrintController.cs
-  // and the docs, ResetDC() always returns the same handle as given.
-  Win32Check(Windows.ResetDC(FDC, FDevMode^) <> 0);
-  FDevModeChanged := false;
+  // With FOptimizeResetDC, FDevMode is applied to the DC only when needed.
+  // With ResetDC, every page starts with the same fresh DC state; by skipping it most of the time, the application
+  // must be more careful when using raw GDI calls.
+  if not FOptimizeResetDC or FDevModeChanged then begin
+	// ResetDC() resets the mapping mode (SetMapMode + SetViewportExtEx + SetWindowExtEx) and the world transformation
+	// (SetWorldTransform), the origins (SetViewportOrgEx + SetWindowOrgEx + SetBrushOrgEx), maybe also the graphics mode
+	// (SetGraphicsMode):
+	// According to https://referencesource.microsoft.com/#System.Drawing/commonui/System/Drawing/Printing/DefaultPrintController.cs
+	// and the docs, ResetDC() always returns the same handle as given.
+	Win32Check(Windows.ResetDC(FDC, FDevMode^) <> 0);
+	FDevModeChanged := false;
 
-  // ResetDC might have altered the page orientation, and therefore the DPI of the Y axis:
-  FUnitsPerInch := self.GetDPI.cy;
-  TPrinterCanvas(FCanvas).UpdateFont;
+	// ResetDC might have altered the page orientation, and therefore the DPI of the Y axis:
+	FUnitsPerInch := self.GetDPI.cy;
+	TPrinterCanvas(FCanvas).UpdateFont;
+  end;
 
   Win32Check(Windows.StartPage(FDC) > 0);
   Inc(FPageNumber);
