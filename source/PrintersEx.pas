@@ -249,6 +249,15 @@ type
   TPrinterOptions = array of TPrinterOption;
 
 
+  TPrinterPaperSize = record
+	Name: string;			// name (like 'A4', 'Letter')
+	ID: uint16;				// ID for SelectPaperSize()
+	Size: TSize;			// width and height of the paper sheet, in 0.1 mm units
+  end;
+
+  TPrinterPaperSizes = array of TPrinterPaperSize;
+
+
   // https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-logfontw
   // https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-textmetricw
   TFontItem = record
@@ -291,7 +300,8 @@ type
 	procedure ConvToLoMM(var Size: TSize);
 	procedure CreateIC;
 	procedure DeleteDC;
-	function GetOptions(CapNames, CapIDs, LenName, LenID: uint16): TPrinterOptions;
+	function GetOptions(CapNames, CapIDs: uint16; LenName, LenID: integer): TPrinterOptions;
+	class function StrFromBuf(Buf: PChar; Len: integer): string; static;
 	procedure CheckCapability(Capability: TPrinterCapability);
 	function EndPage: boolean;
 
@@ -341,7 +351,7 @@ type
 	property DevMode: PDeviceMode read FDevMode;
 	procedure SetDevMode(Value: PDeviceMode);
 
-	function GetPaperSizes: TPrinterOptions;
+	function GetPaperSizes: TPrinterPaperSizes;
 	procedure SelectPaperSize(ID: uint16);
 	procedure SetCustomPaperSize(const Size: TSize);
 
@@ -1127,17 +1137,75 @@ end;
 
 
  //===================================================================================================================
- // Returns all supported paper formats (like 'Letter', 'A4').
+ // Returns all paper formats supported by the printer, or the paper bin currently selected.
  // Returns an empty list if the printer has no concept of "paper formats".
+ // The sizes are reported in 0.1 mm units, for orientation "Portrait" (0° rotation of the output).
  //===================================================================================================================
-function TPrinterEx.GetPaperSizes: TPrinterOptions;
+function TPrinterEx.GetPaperSizes: TPrinterPaperSizes;
+const
+  NameLen = 64;
+type
+  TName = array [0..NameLen-1] of char;
+var
+  Names: array of TName;
+  IDs: array of WORD;
+  Sizes: array of TPoint;
+  Count: integer;
+  i: integer;
 begin
-  Result := self.GetOptions(DC_PAPERNAMES, DC_PAPERS, 64, sizeof(WORD));
+  Assert(FDevMode <> nil);
+
+  //
+  // Retrieve the names:
+  //
+
+  Count := WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERNAMES, nil, FDevMode);
+  // <DC_PAPERNAMES> may be unsupported or return zero items. There is no way to distingush both conditions
+  // (and no need to to this anyway):
+  if Count <= 0 then
+	exit(nil);
+
+  System.SetLength(Names, Count);
+  Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERNAMES, pointer(Names), FDevMode) >= 0);
+
+  //
+  // Retrieve the IDs:
+  //
+
+  // both lists must match, otherwise its unclear which ID belongs to which name:
+  if WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERS, nil, FDevMode) <> Count then
+	RaiseError('DeviceCapabilities() returned wrong value');
+
+  System.SetLength(IDs, Count);
+  Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERS, pointer(IDs), FDevMode) >= 0);
+
+  //
+  // Retrieve the sizes of the paper formats:
+  //
+
+  // both lists must match, otherwise its unclear which ID belongs to which name:
+  if WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERSIZE, nil, FDevMode) <> Count then
+	RaiseError('DeviceCapabilities() returned wrong value');
+
+  System.SetLength(Sizes, Count);
+  Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERSIZE, pointer(Sizes), FDevMode) >= 0);
+
+  // build the Result array:
+
+  System.SetLength(Result, Count);
+
+  for i := 0 to Count - 1 do begin
+	Result[i].Name := self.StrFromBuf(Names[i], NameLen);
+	Result[i].ID := IDs[i];
+	Result[i].Size.cx := Sizes[i].X;
+	Result[i].Size.cy := Sizes[i].Y;
+  end;
 end;
 
 
  //===================================================================================================================
  // Sets the paper size, using the Windows constants DMPAPER_xxxxx, or one of the IDs from GetPaperSizes.
+ // See comment at SetCustomPaperSize.
  //===================================================================================================================
 procedure TPrinterEx.SelectPaperSize(ID: uint16);
 begin
@@ -1155,6 +1223,20 @@ end;
 
  //===================================================================================================================
  // Sets the paper size, in 0.1 mm units.
+ // The values reported by GetPageSize and GetPrintableArea are affected by this (and also by .Orientation).
+ //
+ // (1)
+ // The printer driver may select some different paper size, as it sees fit. For example, the driver for Ricoh laser
+ // printers (models like "IM C3000") will communicate with the printer to learn the format which is configured at the
+ // printer for the specific paper bin, or the driver selects a "fitting" format from a list configured at the Windows
+ // printer device.
+ //
+ // (2)
+ // The non-printable margins are *not* affected by the selected paper size; they are *always* reducing the
+ // printable area.
+ // Any output outside the printable area is clipped off by Windows.
+ // For example, settings the custom page size to 10 x 12 cm on a HP laser printer will give you a printable area of
+ // 9.6 x 11.6 cm, even on a A4 printer (where a 10x12 area would easily fit on the page).
  //===================================================================================================================
 procedure TPrinterEx.SetCustomPaperSize(const Size: TSize);
 begin
@@ -1218,6 +1300,7 @@ end;
 
  //===================================================================================================================
  // Returns the overall size of the page, including non-printable margins, in 0.1 mm units.
+ // When Orientation is poLandscape, the x and y values in the result are swapped.
  //===================================================================================================================
 function TPrinterEx.GetPageSize: TSize;
 begin
@@ -1230,6 +1313,7 @@ end;
 
  //===================================================================================================================
  // Returns the size of the non-printable margins at the left and the top edge of the page, in 0.1 mm units.
+ // When Orientation is poLandscape, the x and y values in the result are swapped.
  //===================================================================================================================
 function TPrinterEx.GetPageMargins: TSize;
 begin
@@ -1242,6 +1326,7 @@ end;
 
  //===================================================================================================================
  // Returns the size of the printable area on the page, in 0.1 mm units.
+ // When Orientation is poLandscape, the x and y values in the result are swapped.
  // Note: GDI shifts all coordinates by (PHYSICALOFFSETX, PHYSICALOFFSETY). This causes Canvas position (0,0) to be
  // the upper left corner of the printable area, not of the physical page. To print something at the same physical
  // location, one needs to shift everyhing to top-left by the result of GetPageMargins.
@@ -1257,6 +1342,7 @@ end;
 
  //===================================================================================================================
  // Returns the physical resolution of the printer in pixels per inch ("Dots Per Inch").
+ // When Orientation is poLandscape, the x and y values in the result are swapped.
  // For some printers, the X and Y axis might have a different resolution (for example, Brother specifies
  // 4800 x 1200 dpi for the "MFCJ5855DW" model.)
  //===================================================================================================================
@@ -1331,33 +1417,37 @@ end;
 
 
  //===================================================================================================================
+ // Converts up to <Len> characters from <Buf> into a string
+ //===================================================================================================================
+class function TPrinterEx.StrFromBuf(Buf: PChar; Len: integer): string;
+var
+  i: integer;
+begin
+  // trim leading spaces (should not be there, but HP is doing this):
+  i := 0;
+  while (i < Len) and (Buf[i] = ' ') do inc(i);
+  // Searching the #0 terminator. If all <Len> chars are used, there is none.
+  for i := i to Len - 1 do begin
+	if Buf[i] = #0 then begin
+	  Len := i;
+	  break;
+	end;
+  end;
+  System.SetString(Result, Buf, Len);
+end;
+
+
+ //===================================================================================================================
  // Retrieves names with corresponding IDs. <LenName> and <LenID> must match the documented values for the respective
  // capability.
  // https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-devicecapabilitiesa
  //===================================================================================================================
-function TPrinterEx.GetOptions(CapNames, CapIDs, LenName, LenID: uint16): TPrinterOptions;
+function TPrinterEx.GetOptions(CapNames, CapIDs: uint16; LenName, LenID: integer): TPrinterOptions;
 type
   PUInt16 = ^UInt16;
   PUInt32 = ^UInt32;
 
-  function _StrFromBuf(Buf: PChar; Len: uint16): string;
-  var
-	i: integer;
-  begin
-	// trim leading spaces (should not be there, but HP is doing this):
-	i := 0;
-	while (i < Len) and (Buf[i] = ' ') do inc(i);
-	// Searching the #0 terminator. If all <Len> chars are used, there is none.
-	for i := i to Len - 1 do begin
-	  if Buf[i] = #0 then begin
-		Len := i;
-		break;
-	  end;
-	end;
-	SetString(Result, Buf, Len);
-  end;
-
-  function _IdFromBuf(Buf: PByte; Len: uint16): uint32; inline;
+  function _IdFromBuf(Buf: PByte; Len: integer): uint32; inline;
   begin
 	if Len = 4 then
 	  Result := PUInt32(Buf)^
@@ -1366,47 +1456,47 @@ type
   end;
 
 var
-  CountNames: integer;
-  CountIDs: integer;
   Names: array of char;
   IDs: array of byte;
+  Count: integer;
   i: integer;
   PStr: PChar;
   PID: PByte;
 begin
-  // Retrieve the names:
+  Assert(FDevMode <> nil);
 
-  CountNames := WinSpool.DeviceCapabilities(pointer(FName), nil, CapNames, nil, FDevMode);
-  // <CapNames> may be unsupported or return zero items. There is no way to distingush this (and no need to to this
-  // anyway):
-  if CountNames <= 0 then
+  //
+  // Retrieve the names:
+  //
+
+  Count := WinSpool.DeviceCapabilities(pointer(FName), nil, CapNames, nil, FDevMode);
+  // <CapNames> may be unsupported or return zero items. There is no way to distingush both conditions (and no need to
+  // to this anyway):
+  if Count <= 0 then
 	exit(nil);
 
-  System.SetLength(Names, CountNames * LenName);
+  System.SetLength(Names, Count * LenName);
   Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, CapNames, pointer(Names), FDevMode) >= 0);
 
+  //
   // Retrieve the IDs:
-
-  CountIDs := WinSpool.DeviceCapabilities(pointer(FName), nil, CapIDs, nil, FDevMode);
-  // DC_BINS may be unsupported:
-  if CountIDs < 0 then
-	exit(nil);
+  //
 
   // both lists must match, otherwise its unclear which ID belongs to which name:
-  if CountIDs <> CountNames then
+  if WinSpool.DeviceCapabilities(pointer(FName), nil, CapIDs, nil, FDevMode) <> Count then
 	RaiseError('DeviceCapabilities() returned wrong value');
 
-  System.SetLength(IDs, CountIDs * LenID);
+  System.SetLength(IDs, Count * LenID);
   Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, CapIDs, pointer(IDs), FDevMode) >= 0);
 
   // combine names and IDs in the result:
 
-  System.SetLength(Result, CountIDs);
+  System.SetLength(Result, Count);
 
   PStr := pointer(Names);
   PID := pointer(IDs);
-  for i := 0 to CountIDs - 1 do begin
-	Result[i].Name := _StrFromBuf(PStr, LenName);
+  for i := 0 to Count - 1 do begin
+	Result[i].Name := self.StrFromBuf(PStr, LenName);
 	Result[i].ID := _IdFromBuf(PID, LenID);
 	inc(PStr, LenName);
 	inc(PID, LenID);
@@ -1490,7 +1580,7 @@ begin
   if not _GetDefaultPrinter(DefaultPrinter, Len) then
 	Result := ''
   else
-	SetString(Result, DefaultPrinter, Len - 1);
+	System.SetString(Result, DefaultPrinter, Len - 1);
 end;
 
 
@@ -1573,14 +1663,27 @@ procedure UnitTest;
   begin
   end;
 
+  function _Swap(S: TSize): TSize;
+  begin
+	Result.cx := S.cy;
+	Result.cy := S.cx;
+  end;
+
+  function _EquqalSize(const a, b: TSize): boolean;
+  begin
+    Result := (a.cx = b.cx) and (a.cy = b.cy);
+  end;
+
 const
   Printer = 'Microsoft Print to PDF';
   Page1 = 'Page 1';
   Page2 = 'Page 2';
 var
   p: TPrinterEx;
+  PageSize: TSize;
   s, m, a: TSize;
   Strings: TStringDynArray;
+  Papers: TPrinterPaperSizes;
   Options: TPrinterOptions;
   Fonts: TFontDynArray;
   f: TFont;
@@ -1609,8 +1712,8 @@ begin
   //p.SetPaperSize(DMPAPER_A4);
   //p.SetMediaType(DMMEDIA_STANDARD);
 
+  Papers := p.GetPaperSizes;
   Options := p.GetPaperSources;
-  Options := p.GetPaperSizes;
   Options := p.GetMediaTypes;
   Strings := p.GetFonts;
   Fonts := p.GetFontsEx;
@@ -1623,12 +1726,34 @@ begin
   a := p.GetPrintableArea;
 
   // set paper size to A4 format:
-  s.cx := 210 * 10;
-  s.cy := 297 * 10;
-  p.SetCustomPaperSize(s);
+  PageSize.cx := 210 * 10;
+  PageSize.cy := 297 * 10;
+  p.Orientation := poPortrait;
+  p.SetCustomPaperSize(PageSize);
   s := p.GetPageSize;
   m := p.GetPageMargins;
   a := p.GetPrintableArea;
+  Assert(_EquqalSize(s, PageSize));
+
+  // poLandscape swaps all the infos:
+  p.Orientation := poLandscape;
+  Assert(_EquqalSize(s, _Swap(p.GetPageSize)));
+  Assert(_EquqalSize(m, _Swap(p.GetPageMargins)));
+  Assert(_EquqalSize(a, _Swap(p.GetPrintableArea)));
+
+  // poLandscape does not swap the meaning of SelectPaperSize + SetCustomPaperSize, only the reported sizes:
+  PageSize.cx := 210 * 10;
+  PageSize.cy := 297 * 10;
+  p.Orientation := poLandscape;
+  p.SetCustomPaperSize(PageSize);
+  Assert(_EquqalSize(s, _Swap(p.GetPageSize)));
+  Assert(_EquqalSize(m, _Swap(p.GetPageMargins)));
+  Assert(_EquqalSize(a, _Swap(p.GetPrintableArea)));
+
+  // DMPAPER_A4 is exactly the same as SetCustomPaperSize(210x297)
+  p.Orientation := poLandscape;
+  p.SelectPaperSize(DMPAPER_A4);
+  Assert(_EquqalSize(s, _Swap(p.GetPageSize)));
 
   // create a PDF file containing a single empty page with the default paper size:
   p.BeginDoc('Test', 'C:\TEMP\test.pdf');
