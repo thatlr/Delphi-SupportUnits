@@ -27,7 +27,7 @@ unit PrintersEx;
 
   - When OptimizeResetDC is not set, all device context properties that are not represented by VCL objects are reset for
 	each page: This means that Pen, Brush, Font, CopyMode and TextFlags are retained, but PenPos and everything one can
-	set directly at the GDI	Device Context (like Mapping Mode, global transformation) start fresh.
+	set directly at the GDI Device Context (like Mapping Mode, global transformation) start fresh.
 	When OptimizeResetDC is set, this happens only when format settings (like PageOrientation) are changed within a
 	job.
 	Setting OptimizeResetDC could have a positive effect with printer drivers for printers with special features
@@ -101,6 +101,21 @@ unit PrintersEx;
   On the other hand, the driver "HP Universal Printing PCL 6 (v6.4.1)" just works.
   To exclude the TCanvas implementation as a source of the error, a test with memory device contexts shows no failure.
   There seems to be some bug in the Windows GDI printing support which is really unsatisfactory.
+
+
+  Incorrectly implemented printer drivers
+
+  There are printer drivers (example: ZDesigner, for Zebra printers) which seem to misinterpret calls to ResetDC() as
+  the start of another job. If ResetDC() is called between pages, the ZDesigner driver injects the command sequence for
+  the start of a print job before each page instead of only at the real start of the print job. To prevent this, the
+  property OptimizeResetDC of TPrinterEx should be set.
+
+  There are printer drivers that do not correctly implement world transformation, specifically the rotation by 90° or 270°
+  in BitBlt(), StretchBlt() and similar GDI calls. The observed effect is a shift of the bitmap by one pixel in both X and
+  Y directions: The bitmap is shifted by one pixel, one row and one column of the bitmap disappears and a black row/column
+  of one pixel is drawn on the other side of the bitmap.
+  One way to get around this is to implement the rotation (and possibly the stretch and the transformation from world to
+  device coordinates) yourself; thereby not using TCanvas.Draw() or TBitmap.Draw().
 
 
   SaveDC/RestoreDC/GDI objects
@@ -438,6 +453,12 @@ begin
   if not Cond then RaiseError(SysErrorMessage(Windows.GetLastError));
 end;
 
+ // In contrast to Assert(), the code for calculating the argument is not removed in RELEASE mode.
+procedure MyAssert(Cond: boolean); inline;
+begin
+  Assert(Cond);
+end;
+
 
 { TFontItem }
 
@@ -593,12 +614,13 @@ end;
 
  //===================================================================================================================
  // Destroy the device context.
+ // Since it is used in 'Destroy', it must not throw an exception.
  //===================================================================================================================
 procedure TPrinterEx.DeleteDC;
 begin
   Assert(FDC <> 0);
   FCanvas.Handle := 0;
-  Win32Check(Windows.DeleteDC(FDC) );
+  MyAssert(Windows.DeleteDC(FDC));
   FDC := 0;
 end;
 
@@ -753,25 +775,29 @@ end;
 
 
  //===================================================================================================================
- // Internal: Finishes the current page. Returns false, if the Windows print job was cancelled by some outside action.
+ // Internal: Finishes the current page. Returns false, if the Windows print job was cancelled by some outside action
+ // or if there is some other failure with the printing system (spooler, driver).
+ // EndPage() seems not to set GetLastError. EndPage() may fail for some incomplete/inconsistent printer + driver setups
+ // (then the job definitely fails to print).
  //===================================================================================================================
 function TPrinterEx.EndPage: boolean;
 begin
-  Result := Windows.EndPage(FDC) > 0;
   // false => job was cancelled by another program like Windows' Print Queue GUI, using
   // Windows.SetJob(, JOB_CONTROL_DELETE) or Windows.SetPrinter(, PRINTER_CONTROL_PURGE):
-  if not Result then
-	self.Abort;
+  Result := Windows.EndPage(FDC) > 0;
 end;
 
 
  //===================================================================================================================
  // Finishes the last page and also the printjob. Returns false, if the Windows print job was cancelled by some action
  // outside of this object.
+ // After this call, the job is definitely finished (Printing = false). If an error occurred during the call, the job
+ // is implicitly aborted (Aborted = true).
  //===================================================================================================================
 function TPrinterEx.EndDoc: boolean;
 begin
   self.CheckPrinting(true);
+
   try
 	Assert(FDC <> 0);
 	FCanvas.Handle := 0;
@@ -781,12 +807,13 @@ begin
 
 	Win32Check(Windows.EndDoc(FDC) > 0);
 
+	// makes Abort() a no-op:
 	FState := psIdle;
-	Result := true;
-  except
+  finally
 	self.Abort;
-	raise;
   end;
+
+  Result := true;
 end;
 
 
@@ -795,6 +822,7 @@ end;
  // For printers that use Print Job Language, the Windows spooler tries to cancel the job on the printer; for other
  // printers, it simply stops the data transfer.
  // https://en.wikipedia.org/wiki/Printer_Job_Language
+ // Since it is used in 'Destroy', it must not throw an exception.
  //===================================================================================================================
 procedure TPrinterEx.Abort;
 begin
@@ -804,7 +832,7 @@ begin
 
 	Assert(FDC <> 0);
 	FCanvas.Handle := 0;
-	Win32Check(Windows.AbortDoc(FDC) > 0);
+	Windows.AbortDoc(FDC);
   end;
 end;
 
