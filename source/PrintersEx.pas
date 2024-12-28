@@ -33,6 +33,12 @@ unit PrintersEx;
 	Setting OptimizeResetDC could have a positive effect with printer drivers for printers with special features
 	(like dedicated memory for temporarily storing fonts or images).
 
+  - A Windows print job can be cancelled at any time, for example if some other app calls Windows.SetJob(, JOB_CONTROL_DELETE)
+	or Windows.SetPrinter(, PRINTER_CONTROL_PURGE). Due to this, the methods BeginDoc((), NewPage() and EndDoc() may
+	return false. The application must check and handle this, as continuing to print is pointless, and the Windows
+	documentation does not describe if the print API calls are even supposed to fail at job cancellation (but sometimes,
+	they do).
+
 
   Threading:
 
@@ -150,7 +156,7 @@ unit PrintersEx;
   select the objects from SaveDC() back into the DC. Now, when the properties of p.Canvas.Font (or .Pen or .Brush) are
   changed, TCanvas.FontChanged() is called but will *not* deselect the font handle from the DC, and then the font handle
   is destroyed while being still selected into the DC.
-  As this kinds of Delphi objects are pooled und shared across TCanvas instances, this error may affect a multi-threaded
+  As these kinds of Delphi objects are pooled und shared across TCanvas instances, this error may affect a multi-threaded
   applications with a much higher probability.
   (About the example: As there is no reliable way to resync TCanvas with the state of the DC, it is best to avoid SaveDC
    + RestoreDC in the first place.)
@@ -296,20 +302,17 @@ type
   // A TPrinterEx object is not bound to a specific thread; methods or properties can be accessed from any thread as
   // long as no two thread are doing this at the same time.
   TPrinterEx = class(TObject)
-  strict private type
-	TState = (psIdle, psPrinting, psAborted);
   strict private
 	FName: string;
 	FDevMode: PDeviceMode;
 	FCanvas: TCanvas;
 	FUnitsPerInch: integer;
 	FDC: HDC;
+	FJobID: uint32;
+	FPrinting: boolean;
 	FDevModeChanged: boolean;
 	FOptimizeResetDC: boolean;
-	FJobID: uint32;
-
 	FPageNumber: integer;
-	FState: TState;
 	FCapabilities: TPrinterCapabilities;
 
 	procedure ConvToLoMM(var Size: TSize);
@@ -333,7 +336,6 @@ type
 	procedure SetOrientation(Value: TPrinterOrientation);
 	function GetScale: uint16;
 	procedure SetScale(Value: uint16);
-	function GetState(State: TState): boolean; inline;
   protected
 	property DC: HDC read FDC;
 	procedure CheckPrinting(Value: boolean);
@@ -347,7 +349,6 @@ type
 	procedure SetMapMode(MapMode: byte; IgnorePageMargins: boolean);
 
 	property Name: string read FName;
-	property Aborted: boolean index psAborted read GetState;
 	property Canvas: TCanvas read FCanvas;
 	property Capabilities: TPrinterCapabilities read FCapabilities;
 	property Collate: boolean read GetCollate write SetCollate;
@@ -356,7 +357,7 @@ type
 	property JobID: uint32 read FJobID;
 	property Orientation: TPrinterOrientation read GetOrientation write SetOrientation;
 	property PageNumber: integer read FPageNumber;
-	property Printing: boolean index psPrinting read GetState;
+	property Printing: boolean read FPrinting;
 	property Scale: uint16 read GetScale write SetScale;
 	property UseColor: boolean read GetColor write SetColor;
 	property OptimizeResetDC: boolean read FOptimizeResetDC write FOptimizeResetDC;
@@ -390,7 +391,7 @@ type
 	class function GetDefaultPrinter: string; static;
 
 	class function SetJob(const PrinterName: string; JobID: uint32; Cmd: TPrintJobCmd): boolean; static;
-	class function GetJobStatus(const PrinterName: string; JobID: uint32; out Status: TPrintJobStatus): boolean;
+	class function GetJobStatus(const PrinterName: string; JobID: uint32; out Status: TPrintJobStatus): boolean; static;
   end;
 
 
@@ -497,7 +498,7 @@ end;
 
 
  //===================================================================================================================
- // should be called by TCanvas only once per page:
+ // Is called by TCanvas normally at most once per page (as long as .Handle is not set to zero).
  // Should not cause the resources (Font, Pen, Brush) to be selected into the canvas at this point. This happens
  // afterwards in TCanvas.RequiredState() when requested.
  //===================================================================================================================
@@ -587,16 +588,7 @@ end;
 
 
  //===================================================================================================================
- // Support for the properties Aborted and Printing.
- //===================================================================================================================
-function TPrinterEx.GetState(State: TState): boolean;
-begin
-  Result := FState = State;
-end;
-
-
- //===================================================================================================================
- // Create an information context using the current content of FDevMode, or update it.
+ // Provides a device context using the current content of FDevMode, or updates it.
  //===================================================================================================================
 procedure TPrinterEx.CreateIC;
 begin
@@ -605,7 +597,7 @@ begin
 	Win32Check(FDC <> 0);
 	FDevModeChanged := false;
   end
-  else if FDevModeChanged and (FState <> psPrinting) then begin
+  else if FDevModeChanged and not FPrinting then begin
 	Win32Check(Windows.ResetDC(FDC, FDevMode^) <> 0);
 	FDevModeChanged := false;
   end;
@@ -613,7 +605,7 @@ end;
 
 
  //===================================================================================================================
- // Destroy the device context.
+ // Destroys the device context.
  // Since it is used in 'Destroy', it must not throw an exception.
  //===================================================================================================================
 procedure TPrinterEx.DeleteDC;
@@ -628,7 +620,7 @@ end;
  //===================================================================================================================
  // This defines the unit of measure ("logical unit") used by all TCanvas operations, including the dimensions of the
  // font, pen and brush used by this TCanvas object.
- // Can be called with MM_TEXT, MM_HIENGLISH, MM_HIMETRIC, MM_LOENGLISH, MM_LOMETRIC or MM_TWIPS:
+ // Can be called with MM_TEXT, MM_HIENGLISH, MM_HIMETRIC, MM_LOENGLISH, MM_LOMETRIC or MM_TWIPS.
  // The standard map mode is MM_TEXT, which uses "pixel" as logical unit.
  // For MM_ANISOTROPIC or MM_ISOTROPIC, you need to create your own method.
  // https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-setmapmode
@@ -667,22 +659,21 @@ begin
   end;
 
   if IgnorePageMargins then
-	// map the Canvas coordinate (0,0) to the upper left corner of the physical page (instead to the upper left corner
-	// of the printable area):
+	// map the Canvas coordinate (0,0) to the upper left corner of the physical page:
 	Windows.SetViewportOrgEx(FDC, -Windows.GetDeviceCaps(FDC, PHYSICALOFFSETX), -Windows.GetDeviceCaps(FDC, PHYSICALOFFSETY), nil)
   else
+	// map the Canvas coordinate (0,0) to the upper left corner of the printable area:
 	Windows.SetViewportOrgEx(FDC, 0, 0, nil);
 
-  // Force FCanvas.Font.PixelsPerInch to match FUnitsPerInch (FCanvas is only allocated once + the VCL seems to expect
-  // TCanvas.Font.PixelsPerInch to be the resolution of the device context).
+  // Force FCanvas.Font.PixelsPerInch to match FUnitsPerInch.
   // TCanvas.Font.PixelsPerInch is used when a font is assigned to the canvas: If source and target font have different
-  // PixelsPerInch values, then the .Height of the assigned font is recalculated from its .Size property.
+  // PixelsPerInch values, then the .Height of the assigned font is converted accordingly.
   TPrinterCanvas(FCanvas).UpdateFont;
 end;
 
 
  //===================================================================================================================
- // Throw exception if the printer does not support <Capability>.
+ // Throws an EPrinter exception if the printer does not support <Capability>.
  //===================================================================================================================
 procedure TPrinterEx.CheckCapability(Capability: TPrinterCapability);
 begin
@@ -692,11 +683,11 @@ end;
 
 
  //===================================================================================================================
- // Throw exception if the printer is not in the state requested by <Value>.
+ // Throws an EPrinter exception if the printer is not in the state requested by <Value>.
  //===================================================================================================================
 procedure TPrinterEx.CheckPrinting(Value: boolean);
 begin
-  if self.Printing <> Value then
+  if FPrinting <> Value then
 	if Value then RaiseError(Consts.SNotPrinting)
 	else RaiseError(Consts.SPrinting);
 end;
@@ -706,7 +697,7 @@ end;
  // Starts a print job <JobName> at the printer, optionally redirecting the output to <OutputFilename>.
  // If the printer opens some dialog at this point (for example, 'Microsoft Print to PDF' will do this) and this
  // dialog is cancelled by the user, false is returned.
- // Returns false, if the Windows print job was cancelled by some action outside of this object.
+ // Throws an EOSError exception if Windows cannot create a print job for whatever reason.
  //===================================================================================================================
 function TPrinterEx.BeginDoc(const JobName: string; const OutputFilename: string = ''): boolean;
 var
@@ -720,12 +711,11 @@ begin
   // always start with a fresh DC:
   if FDC <> 0 then self.DeleteDC;
 
-  // printer may have been deleted by now:
   FDC := Windows.CreateDC(nil, PChar(FName), nil, FDevMode);
   Win32Check(FDC <> 0);
   FDevModeChanged := false;
 
-  // The file-selection dialog of "Microsoft Print to PDF" select a wrong window as its owner (it uses the *owner* of
+  // The file-selection dialog of "Microsoft Print to PDF" selects a wrong window as its owner (it uses the *owner* of
   // the active window instead of the active window itself). To mitigate this error, we
   // => prevent clicking the still active window
   // => restore the Active state afterwards, as it is wrongly restored by the file selection dialog
@@ -752,13 +742,12 @@ begin
 	if JobID <= 0 then begin
 	  // if the dialog was not cancelled by the user, throw an exception:
 	  Win32Check(Windows.GetLastError = ERROR_CANCELLED);
-	  FState := psAborted;
 	  exit(false);
 	end;
 
 	// StartDoc() has created a job in the spooler => enable AbortDoc():
 	FJobID := JobID;
-	FState := psPrinting;
+	FPrinting := true;
 
   finally
 	if Reenable then Windows.EnableWindow(ActiveWnd, true);
@@ -791,8 +780,8 @@ end;
  //===================================================================================================================
  // Finishes the last page and also the printjob. Returns false, if the Windows print job was cancelled by some action
  // outside of this object.
- // After this call, the job is definitely finished (Printing = false). If an error occurred during the call, the job
- // is implicitly aborted (Aborted = true).
+ // After this call, the job is definitely finished (Printing = false). If an error occurred during the call, an EOSError
+ // exception is thrown and the job is automatically aborted.
  //===================================================================================================================
 function TPrinterEx.EndDoc: boolean;
 begin
@@ -802,17 +791,19 @@ begin
 	Assert(FDC <> 0);
 	FCanvas.Handle := 0;
 
-	if not self.EndPage then
+	if not self.EndPage then begin
+	  self.Abort;
 	  exit(false);
+	end;
 
 	Win32Check(Windows.EndDoc(FDC) > 0);
 
-	// makes Abort() a no-op:
-	FState := psIdle;
-  finally
+  except
 	self.Abort;
+	raise;
   end;
 
+  FPrinting := false;
   Result := true;
 end;
 
@@ -826,9 +817,9 @@ end;
  //===================================================================================================================
 procedure TPrinterEx.Abort;
 begin
-  if FState = psPrinting then begin
+  if FPrinting then begin
 	// use AbortDoc() only once and only between StartDoc() and EndDoc():
-	FState := psAborted;
+	FPrinting := false;
 
 	Assert(FDC <> 0);
 	FCanvas.Handle := 0;
@@ -887,6 +878,8 @@ end;
  // To make the object aware of changes made directly to fields of the DevMode property, use this:
  //   obj.SetDevMode(obj.DevMode);
  // If a print job is currently generated, any changes will be delayed until the next page.
+ // The merge uses only those fields from <Value> for which the associated flag in Value.dmFields is set.
+ // See: https://learn.microsoft.com/en-us/windows/win32/printdocs/documentproperties, description of DM_IN_BUFFER.
  //===================================================================================================================
 procedure TPrinterEx.SetDevMode(Value: PDeviceMode);
 var
@@ -1211,7 +1204,7 @@ begin
   // Retrieve the sizes of the paper formats:
   //
 
-  // both lists must match, otherwise its unclear which ID belongs to which name:
+  // both lists must match, otherwise its unclear which size belongs to which name:
   if WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERSIZE, nil, FDevMode) <> Count then
 	RaiseError('DeviceCapabilities() returned wrong value');
 
@@ -1452,10 +1445,12 @@ var
   i: integer;
 begin
   // trim leading spaces (should not be there, but HP is doing this):
-  i := 0;
-  while (i < Len) and (Buf[i] = ' ') do inc(i);
+  while (Len > 0) and (Buf^ = ' ') do begin
+	inc(Buf);
+	dec(Len);
+  end;
   // Searching the #0 terminator. If all <Len> chars are used, there is none.
-  for i := i to Len - 1 do begin
+  for i := 0 to Len - 1 do begin
 	if Buf[i] = #0 then begin
 	  Len := i;
 	  break;
@@ -1499,7 +1494,7 @@ begin
 
   Count := WinSpool.DeviceCapabilities(pointer(FName), nil, CapNames, nil, FDevMode);
   // <CapNames> may be unsupported or return zero items. There is no way to distingush both conditions (and no need to
-  // to this anyway):
+  // do this anyway):
   if Count <= 0 then
 	exit(nil);
 
@@ -1614,9 +1609,9 @@ end;
 
  //===================================================================================================================
  // Sends the given command for the Windows print job to the spooler.
- // Throws an exception if <PrinterName> is invalid.
+ // Throws an EOSError exception if <PrinterName> is invalid.
  // Returns true, if a job <JobID> was found at the printer <PrinterName> and <Cmd> was accepted by the spooler.
- // Returns false, when no job was found.
+ // Returns false, if no job was found.
  //
  // Note:
  // The application must have the required permissions (for example, the job might belong to another user).
@@ -1641,9 +1636,9 @@ end;
 
 
  //===================================================================================================================
- // Throws an exception if <PrinterName> is invalid.
+ // Throws an EOSError exception if <PrinterName> is invalid.
  // Returns true, if a job <JobID> was found at the printer <PrinterName> and <Status> is set.
- // Returns false, when no job was found.
+ // Returns false, if no job was found.
  // An empty set indicates that the job is completely stored in the spooler, but the print queue is paused (therefore,
  // no attempt was made so far by the spooler to send the job to the printer).
  //===================================================================================================================
@@ -1697,9 +1692,22 @@ procedure UnitTest;
 	Result.cy := S.cx;
   end;
 
-  function _EquqalSize(const a, b: TSize): boolean;
+  function _EqualSize(const a, b: TSize): boolean;
   begin
-    Result := (a.cx = b.cx) and (a.cy = b.cy);
+	Result := (a.cx = b.cx) and (a.cy = b.cy);
+  end;
+
+  function _GetTempFile: string;
+  var
+	inlen: DWORD;
+	outlen: DWORD;
+  begin
+	inlen := 1024;
+	System.SetLength(Result, inlen);
+	outlen := Windows.GetTempPath(inlen, PChar(Result));
+	Win32Check((outlen > 0) and (outlen < inlen));
+	System.SetLength(Result, outlen);
+	Result := Result + '\test.dat';
   end;
 
 const
@@ -1761,30 +1769,30 @@ begin
   s := p.GetPageSize;
   m := p.GetPageMargins;
   a := p.GetPrintableArea;
-  Assert(_EquqalSize(s, PageSize));
+  Assert(_EqualSize(s, PageSize));
 
   // poLandscape swaps all the infos:
   p.Orientation := poLandscape;
-  Assert(_EquqalSize(s, _Swap(p.GetPageSize)));
-  Assert(_EquqalSize(m, _Swap(p.GetPageMargins)));
-  Assert(_EquqalSize(a, _Swap(p.GetPrintableArea)));
+  Assert(_EqualSize(s, _Swap(p.GetPageSize)));
+  Assert(_EqualSize(m, _Swap(p.GetPageMargins)));
+  Assert(_EqualSize(a, _Swap(p.GetPrintableArea)));
 
   // poLandscape does not swap the meaning of SelectPaperSize + SetCustomPaperSize, only the reported sizes:
   PageSize.cx := 210 * 10;
   PageSize.cy := 297 * 10;
   p.Orientation := poLandscape;
   p.SetCustomPaperSize(PageSize);
-  Assert(_EquqalSize(s, _Swap(p.GetPageSize)));
-  Assert(_EquqalSize(m, _Swap(p.GetPageMargins)));
-  Assert(_EquqalSize(a, _Swap(p.GetPrintableArea)));
+  Assert(_EqualSize(s, _Swap(p.GetPageSize)));
+  Assert(_EqualSize(m, _Swap(p.GetPageMargins)));
+  Assert(_EqualSize(a, _Swap(p.GetPrintableArea)));
 
   // DMPAPER_A4 is exactly the same as SetCustomPaperSize(210x297)
   p.Orientation := poLandscape;
   p.SelectPaperSize(DMPAPER_A4);
-  Assert(_EquqalSize(s, _Swap(p.GetPageSize)));
+  Assert(_EqualSize(s, _Swap(p.GetPageSize)));
 
-  // create a PDF file containing a single empty page with the default paper size:
-  p.BeginDoc('Test', 'C:\TEMP\test.pdf');
+  // create a PDF file:
+  p.BeginDoc('Test', _GetTempFile);
 
   // abort the job:
   p.Abort;
@@ -1792,18 +1800,16 @@ begin
   p.GetDPI;
 
   // create print job; the spooler will write the generated printer data to the file:
-  p.BeginDoc('Test', 'C:\TEMP\test.pdf');
+  p.BeginDoc('Test', _GetTempFile);
 
   // set logical units to 0.01 mm:
   p.SetMapMode(MM_HIMETRIC, false);
   // dont fill background of text:
   p.Canvas.Brush.Style := bsClear;
 
-//  // set font height to exact 10mm:
-//  p.Canvas.Font.PixelsPerInch := p.UnitsPerInch;
-//  p.Canvas.Font.Height := 1000;	// 10mm in MM_HIMETRIC (logical unit = 0.01 mm)
-
-  p.Canvas.Font.Size := 15;
+  // set font height to exact 10mm:
+  p.Canvas.Font.PixelsPerInch := p.UnitsPerInch;
+  p.Canvas.Font.Height := 1000;	// 10mm in MM_HIMETRIC (logical unit = 0.01 mm)
 
   // draw text inside a frame:
   p.Canvas.Rectangle(1000, 1000, 1000 + p.Canvas.TextWidth(Page1), 1000 + p.Canvas.TextHeight(Page1));
@@ -1819,13 +1825,15 @@ begin
   p.Canvas.Rectangle(1000, 1000, 1000 + p.Canvas.TextWidth(Page2), 1000 + p.Canvas.TextHeight(Page2));
   p.Canvas.TextOut(1000, 1000, Page2);
 
-  // .Size gets converted by Assign to the printer's resolution (-29 at 96dpi => -776 at MM_HIMETRIC):
+  // .Size gets converted by Assign to the printer's resolution, from 22pt (72 dpi) through pixels at 96 dpi to 7.76mm
+  // at MM_HIMETRIC (2540 dpi):
+  // (96 dpi is the initial value of TFont.PixelsPerInch, as set by the VCL for non-High-DPI GUI apps).
   f := TFont.Create;
   f.Size := 22;
   p.Canvas.Font.Assign(f);
   f.Free;
 
-  // use -776 directly, without conversion from 96dpi to 2540dpi (MM_HIMETRIC)
+  // use 7.76mm directly, without conversion from 72 dpi through 96 dpi to 2540 dpi (MM_HIMETRIC):
   f := TFont.Create;
   f.PixelsPerInch := p.UnitsPerInch;
   f.Height := -776;
@@ -1850,6 +1858,6 @@ begin
 end;
 
 
-//initialization
-//  UnitTest;
+initialization
+  UnitTest;
 end.
