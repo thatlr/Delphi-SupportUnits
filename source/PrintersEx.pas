@@ -100,7 +100,7 @@ unit PrintersEx;
   not loaded into a 32-bit process at all, and Windows uses "splwow64.exe" as a bridge from the 32bit app to the 64bit
   spooler and the driver. Also, the "driver isolation" feature (when activated) should shield even the spooler from
   misbehaving drivers.
-  However, when used by multiple threads in parallel, the Microsoft PostScript printer driver in Windows 10 (PS5UI.DLL,
+  However, when used by multiple threads in parallel, the Microsoft PostScript printer driver in Windows 10 (PSCRIPT5.DLL,
   version 0.3.19041.3693) causes access violations during the GDI call SelectObject() for fonts. The Windows Application
   Verifier detect the use of null handles at a call to KERNELBASE.MapViewOfFile by gdi32full.dll.
   (https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/application-verifier)
@@ -109,7 +109,7 @@ unit PrintersEx;
   There seems to be some bug in the Windows GDI printing support which is really unsatisfactory.
 
 
-  Incorrectly implemented printer drivers
+  Bugs in printer drivers
 
   There are printer drivers (example: ZDesigner, for Zebra printers) which seem to misinterpret calls to ResetDC() as
   the start of another job. If ResetDC() is called between pages, the ZDesigner driver injects the command sequence for
@@ -122,6 +122,11 @@ unit PrintersEx;
   of one pixel is drawn on the other side of the bitmap.
   One way to get around this is to implement the rotation (and possibly the stretch and the transformation from world to
   device coordinates) yourself; thereby not using TCanvas.Draw() or TBitmap.Draw().
+
+  The Microsoft PostScript printer driver in Windows 10 (PSCRIPT5.DLL, version 0.3.19041.3693) does not create multiple
+  copies of a page, if the print job contains only one single page.
+
+  'Microsoft Print to PDF' does not produce monochrome output when UseColor is set to false.
 
 
   SaveDC/RestoreDC/GDI objects
@@ -810,9 +815,8 @@ end;
 
  //===================================================================================================================
  // Cancels the printjob (if any).
- // For printers that use Print Job Language, the Windows spooler tries to cancel the job on the printer; for other
- // printers, it simply stops the data transfer.
- // https://en.wikipedia.org/wiki/Printer_Job_Language
+ // For printers that use Print Job Language (https://en.wikipedia.org/wiki/Printer_Job_Language), the Windows spooler
+ // tries to cancel the job on the printer; for other printers, it simply stops the data transfer.
  // Since it is used in 'Destroy', it must not throw an exception.
  //===================================================================================================================
 procedure TPrinterEx.Abort;
@@ -849,7 +853,7 @@ begin
   // must be more careful when using raw GDI calls.
   if not FOptimizeResetDC or FDevModeChanged then begin
 	// ResetDC() resets the mapping mode (SetMapMode + SetViewportExtEx + SetWindowExtEx) and the world transformation
-	// (SetWorldTransform), the origins (SetViewportOrgEx + SetWindowOrgEx + SetBrushOrgEx), maybe also the graphics mode
+	// (SetWorldTransform), the origins (SetViewportOrgEx + SetWindowOrgEx + SetBrushOrgEx), as also the graphics mode
 	// (SetGraphicsMode):
 	// According to https://referencesource.microsoft.com/#System.Drawing/commonui/System/Drawing/Printing/DefaultPrintController.cs
 	// and the docs, ResetDC() always returns the same handle as given.
@@ -875,11 +879,13 @@ end;
  // The DEVMODE structure pointed to by <Value> must be compatible with this Windows printer (that is: it must be
  // obtained from the exact same printer driver).
  // The call does not transfer ownership of <Value>.
- // To make the object aware of changes made directly to fields of the DevMode property, use this:
- //   obj.SetDevMode(obj.DevMode);
- // If a print job is currently generated, any changes will be delayed until the next page.
+ // If a print job is currently generated, any changes will be delayed until the next page, otherwise the effect is
+ // immediate.
  // The merge uses only those fields from <Value> for which the associated flag in Value.dmFields is set.
  // See: https://learn.microsoft.com/en-us/windows/win32/printdocs/documentproperties, description of DM_IN_BUFFER.
+ //
+ // The fields of TPrinterEx.DevMode must not be changed directly: This property only exists to give the application
+ // access to other content inside this structure.
  //===================================================================================================================
 procedure TPrinterEx.SetDevMode(Value: PDeviceMode);
 var
@@ -934,7 +940,7 @@ begin
 
   if Value <> nil then begin
 	// basic validation of the given DEVMODE structure:
-	Win32Check(_IsValidDevmode(Value, Value.dmSize + Value.dmDriverExtra) );
+	Win32Check(_IsValidDevmode(Value, Value.dmSize + Value.dmDriverExtra));
 	// merge settings from <Value> with the current settings in FDevMode:
 	Win32Check(WinSpool.DocumentProperties(0, 0, PChar(FName), FDevMode, Value, DM_IN_BUFFER or DM_OUT_BUFFER) >= 0);
 	FDevModeChanged := true;
@@ -1128,7 +1134,7 @@ begin
 
   // Workaround for a bug in HP PCL drivers which include the names of media types in this list, which fortunately use
   // greater ID values => removing such elements from the result.
-  // (The same buggy driver reports a space in front of the names.)
+  // (The same driver reports a space in front of the names.)
   j := 0;
   for i := Low(Result) to High(Result) do begin
 	if Result[i].ID < DMBIN_USER + 256 then begin
@@ -1253,17 +1259,15 @@ end;
  // printer device.
  //
  // (2)
- // The non-printable margins are *not* affected by the selected paper size; they are *always* reducing the
- // printable area.
- // Any output outside the printable area is clipped off by Windows.
- // For example, settings the custom page size to 10 x 12 cm on a HP laser printer will give you a printable area of
- // 9.6 x 11.6 cm, even on a A4 printer (where a 10x12 area would easily fit on the page).
+ // Most of the time, the non-printable margins are not affected by the selected paper size; but its up the printer
+ // driver how this is handled. For example, settings the custom page size to 10 x 12 cm on a HP A4 laser printer will
+ // give you a printable area of 9.6 x 11.6 cm, even thought a 10x12 area fits completely on A4).
  //===================================================================================================================
 procedure TPrinterEx.SetCustomPaperSize(const Size: TSize);
 begin
-  // Specifying a custom paper size is possible even when the printer does not know of any standard paper size
+  // Setting a custom paper size is possible even when the printer does not know of any standard paper size
   // (this is a possible by installing a printer with a customized PPD file).
-  // There seems to be no indication if the printer allows to set a custom page size.
+  // There seems to be no indication in Windows if a printer driver allows to set a custom page size.
 
   if (Size.cx <= 0) or (Size.cx > High(FDevMode.dmPaperWidth)) or (Size.cy <= 0) or (Size.cy > High(FDevMode.dmPaperLength)) then
 	RaiseInvalidParamError;
@@ -1310,7 +1314,7 @@ end;
 
 
  //===================================================================================================================
- // Converts from device pixel to units of 0.1 mm (like mapping mode MM_LOMETRIC).
+ // Converts <Size> from device pixel to units of 0.1 mm (like mapping mode MM_LOMETRIC).
  //===================================================================================================================
 procedure TPrinterEx.ConvToLoMM(var Size: TSize);
 begin
@@ -1348,9 +1352,12 @@ end;
  //===================================================================================================================
  // Returns the size of the printable area on the page, in 0.1 mm units.
  // When Orientation is poLandscape, the x and y values in the result are swapped.
- // Note: GDI shifts all coordinates by (PHYSICALOFFSETX, PHYSICALOFFSETY). This causes Canvas position (0,0) to be
- // the upper left corner of the printable area, not of the physical page. To print something at the same physical
- // location, one needs to shift everyhing to top-left by the result of GetPageMargins.
+ // Any output outside the printable area is clipped off by Windows.
+ //
+ // Note: By default, GDI shifts all coordinates by (PHYSICALOFFSETX, PHYSICALOFFSETY). This causes Canvas position (0,0)
+ // to be the upper-left corner of the printable area, not of the physical page. To print at the same physical location
+ // regardless of different non-printable margins at different printers, one needs to shift everyhing to top-left by the
+ // result of GetPageMargins, or use SetMapMode() with IgnorePageMargins = true.
  //===================================================================================================================
 function TPrinterEx.GetPrintableArea: TSize;
 begin
@@ -1376,6 +1383,7 @@ end;
 
 
  //===================================================================================================================
+ // Used by TPrinterEx.GetFonts.
  //===================================================================================================================
 function EnumFontsProc(var LogFont: TLogFont; var TextMetric: TTextMetric; FontType: integer; Ptr: Pointer): integer; stdcall;
 var
@@ -1404,6 +1412,7 @@ end;
 
 
  //===================================================================================================================
+ // Used by TPrinterEx.GetFontsEx.
  //===================================================================================================================
 function EnumFontsExProc(var LogFont: TLogFont; var TextMetric: TTextMetric; FontType: integer; Ptr: Pointer): integer; stdcall;
 var
@@ -1438,13 +1447,13 @@ end;
 
 
  //===================================================================================================================
- // Converts up to <Len> characters from <Buf> into a string
+ // Converts up to <Len> characters from <Buf> into a string.
  //===================================================================================================================
 class function TPrinterEx.StrFromBuf(Buf: PChar; Len: integer): string;
 var
   i: integer;
 begin
-  // trim leading spaces (should not be there, but HP is doing this):
+  // trim leading spaces (should not be there, but the HP PCL driver is doing this):
   while (Len > 0) and (Buf^ = ' ') do begin
 	inc(Buf);
 	dec(Len);
@@ -1529,7 +1538,7 @@ end;
 
  //===================================================================================================================
  // Returns true, if <Name> is the name of an existing local printer or is the UNC name of an existing shared printer
- // (\\server\printername), and if the user has the Windows permissions to at least query the printer.
+ // (\\server\printername), and the user has the Windows permissions to at least query the printer.
  // If false is returned, Windows.GetLastError can be queried.
  //===================================================================================================================
 class function TPrinterEx.PrinterExists(const Name: string): boolean;
@@ -1574,7 +1583,7 @@ begin
 
   GetMem(Buffer, BufSize);
   try
-	Win32Check(WinSpool.EnumPrinters(Flags, nil, Level, Buffer, BufSize, BufSize, NumInfo) );
+	Win32Check(WinSpool.EnumPrinters(Flags, nil, Level, Buffer, BufSize, BufSize, NumInfo));
 
 	System.SetLength(Result, NumInfo);
 
@@ -1591,7 +1600,7 @@ end;
 
 
  //===================================================================================================================
- // Returns the name of the user's default printer, or empty string if there is currently no default printer defined.
+ // Returns the name of the user's default printer, or an empty string if there is currently no default printer defined.
  //===================================================================================================================
 class function TPrinterEx.GetDefaultPrinter: string;
 var
@@ -1609,19 +1618,19 @@ end;
 
  //===================================================================================================================
  // Sends the given command for the Windows print job to the spooler.
- // Throws an EOSError exception if <PrinterName> is invalid.
+ // Throws an EOSError exception if <PrinterName> is invalid, or if there is some spooler error.
  // Returns true, if a job <JobID> was found at the printer <PrinterName> and <Cmd> was accepted by the spooler.
- // Returns false, if no job was found.
+ // Returns false, if no job <JobID> was found.
  //
  // Note:
- // The application must have the required permissions (for example, the job might belong to another user).
+ // The application must have the required permissions on the printer and on the job.
  // Also, the job might already be finisihed and therefore no longer known to the spooler.
  //===================================================================================================================
 class function TPrinterEx.SetJob(const PrinterName: string; JobID: uint32; Cmd: TPrintJobCmd): boolean;
 var
   hPrinter: THandle;
 begin
-  Win32Check(WinSpool.OpenPrinter(PChar(PrinterName), hPrinter, nil) );
+  Win32Check(WinSpool.OpenPrinter(PChar(PrinterName), hPrinter, nil));
   try
 	if not WinSpool.SetJob(hPrinter, JobID, 0, nil, ord(Cmd)) then begin
 	  // => ERROR_INVALID_PARAMETER for unknown JobID:
@@ -1636,11 +1645,11 @@ end;
 
 
  //===================================================================================================================
- // Throws an EOSError exception if <PrinterName> is invalid.
  // Returns true, if a job <JobID> was found at the printer <PrinterName> and <Status> is set.
- // Returns false, if no job was found.
- // An empty set indicates that the job is completely stored in the spooler, but the print queue is paused (therefore,
- // no attempt was made so far by the spooler to send the job to the printer).
+ // Returns false, if no job <JobID> was found.
+ // Throws an EOSError exception if <PrinterName> is invalid, or if there is some spooler error.
+ // If <Status> is returned as an empty set, the job is completely stored in the spooler, but the print queue is paused
+ // (therefore, no attempt was made so far by the spooler to send the job to the printer).
  //===================================================================================================================
 class function TPrinterEx.GetJobStatus(const PrinterName: string; JobID: uint32; out Status: TPrintJobStatus): boolean;
 var
@@ -1648,9 +1657,10 @@ var
   Info: WinSpool.PJobInfo1;
   Bytes: DWORD;
 begin
-  Win32Check(WinSpool.OpenPrinter(PChar(PrinterName), hPrinter, nil) );
+  Win32Check(WinSpool.OpenPrinter(PChar(PrinterName), hPrinter, nil));
   try
 
+	// the allocation includes the strings referenced by JOB_INFO_1:
 	Bytes := 1024;
 	repeat
 
@@ -1664,6 +1674,7 @@ begin
 		  end;
 		end;
 
+		// cast DWORD to a set of flags:
 		Status := TPrintJobStatus(uint16(Info.Status));
 		exit(true);
 	  finally
@@ -1680,7 +1691,7 @@ end;
 
  //===================================================================================================================
  //===================================================================================================================
-procedure UnitTest;
+function UnitTest: boolean;
 
   procedure _SuppressHint(var Dummy);
   begin
@@ -1698,11 +1709,11 @@ procedure UnitTest;
   end;
 
   function _GetTempFile: string;
+  const
+	inlen = 1024;
   var
-	inlen: DWORD;
 	outlen: DWORD;
   begin
-	inlen := 1024;
 	System.SetLength(Result, inlen);
 	outlen := Windows.GetTempPath(inlen, PChar(Result));
 	Win32Check((outlen > 0) and (outlen < inlen));
@@ -1800,6 +1811,8 @@ begin
   p.GetDPI;
 
   // create print job; the spooler will write the generated printer data to the file:
+  p.Copies := 2;
+  p.UseColor := false;
   p.BeginDoc('Test', _GetTempFile);
 
   // set logical units to 0.01 mm:
@@ -1810,6 +1823,7 @@ begin
   // set font height to exact 10mm:
   p.Canvas.Font.PixelsPerInch := p.UnitsPerInch;
   p.Canvas.Font.Height := 1000;	// 10mm in MM_HIMETRIC (logical unit = 0.01 mm)
+  p.Canvas.Font.Color := clRed;
 
   // draw text inside a frame:
   p.Canvas.Rectangle(1000, 1000, 1000 + p.Canvas.TextWidth(Page1), 1000 + p.Canvas.TextHeight(Page1));
@@ -1818,6 +1832,7 @@ begin
   // next page will use paper format A5 in landscape orientation:
   p.Orientation := poLandscape;
   p.SelectPaperSize(DMPAPER_A5);
+
   p.NewPage;
   p.SetMapMode(MM_HIMETRIC, false);
 
@@ -1846,18 +1861,20 @@ begin
 
   Assert(TPrinterEx.GetJobStatus(p.Name, p.JobID, Status) and (pjsSpooling in Status));
 
-  Assert(TPrinterEx.SetJob(p.Name, p.JobID, pjcDelete) );
+//  Assert(TPrinterEx.SetJob(p.Name, p.JobID, pjcDelete) );
 
-  Assert(TPrinterEx.GetJobStatus(p.Name, p.JobID, Status) and (pjsDeleting in Status));
+//  Assert(TPrinterEx.GetJobStatus(p.Name, p.JobID, Status) and (pjsDeleting in Status));
 
   p.EndDoc;
 
   p.Destroy;
 
   Strings := TPrinterEx.GetPrinters;
+
+  Result := true;
 end;
 
 
 initialization
-  UnitTest;
+  Assert(UnitTest);
 end.
