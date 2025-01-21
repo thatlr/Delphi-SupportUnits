@@ -55,13 +55,8 @@ unit PrintDialog2;
 			self.Update;
 			ReactivateCursor;
 
-			try
-			  self.PrintReport(P, FBitmap);
-			  P.EndDoc;
-			except
-			  P.Abort;
-			  raise;
-			end;
+			self.PrintReport(P, FBitmap);
+			P.EndDoc;
 
 		  finally
 			P.Destroy;
@@ -77,6 +72,88 @@ unit PrintDialog2;
 	  end;
 	end;
 
+
+  Example for a command-line program:
+
+	procedure ShowPrintDlg;
+	const
+	  JobTitle = 'Some print job name';
+	var
+	  Dlg: TPrintDialog2;
+	  P: TPrinterEx;
+	  PrintableArea: TSize;
+	  Copies: uint16;
+	  Page: uint16;
+	  Copy: uint16;
+	  Size: TSize;
+	  Txt: string;
+	begin
+	  Dlg := TPrintDialog2.Create;
+	  try
+		Dlg.Title := 'Some dialog title';
+		Dlg.Options := [poPageNums, poWarning];
+		Dlg.PrinterName := 'Microsoft Print to PDF';
+		// document has 10 pages:
+		Dlg.MinPage := 1;
+		Dlg.MaxPage := 10;
+		// pre-select the range 2-4:
+		Dlg.FromPage := 2;
+		Dlg.ToPage := 4;
+
+		if not Dlg.ExecuteInThread(0) then exit;
+
+		P := TPrinterEx.Create(Dlg.PrinterName);
+		try
+		  // set the printer to the selected configuration:
+		  P.SetDevMode(Dlg.DevMode);
+
+		  // handle "Collate" and "Copies":
+		  if pcCollation in P.Capabilities then P.Collate := Dlg.Collate;
+		  if pcCopies in P.Capabilities then begin
+			P.Copies := Dlg.Copies;
+			Copies := 1;
+		  end
+		  else begin
+			Copies := Dlg.Copies;
+		  end;
+
+		  // get area in 0.1 mm:
+		  PrintableArea := P.GetPrintableArea;
+
+		  // print the selected pages, each as many times as requested:
+		  for Page := Dlg.FromPage to Dlg.ToPage do begin
+			for Copy := 1 to Copies do begin
+			  if P.Printing then P.NewPage
+			  else if not P.BeginDoc(JobTitle) then exit;
+			  // set unit of measure to 0.1 mm, as used in <PrintableArea>:
+			  P.SetMapMode(MM_LOMETRIC, false);
+
+			  // text height: 50.0 mm
+			  Txt := Format('- Page %u -', [Page]);
+			  P.Canvas.Font.Height := 500;
+			  P.Canvas.Font.Color := clBlue;
+			  Size := P.Canvas.TextExtent(Txt);
+			  P.Canvas.TextOut((PrintableArea.cx - Size.cx) div 2, (PrintableArea.cy - Size.cy) div 2, Txt);
+
+			  // line with: 1.0 mm
+			  P.Canvas.Pen.Width := 10;
+			  P.Canvas.Pen.Color := clRed;
+			  P.Canvas.Brush.Style := bsClear;
+			  P.Canvas.Rectangle(0, 0, PrintableArea.cx, PrintableArea.cy);
+			end;
+		  end;
+
+		  P.EndDoc;
+
+		finally
+		  P.Destroy;
+		end;
+
+	  finally
+		Dlg.Destroy;
+	  end;
+	end;
+
 }
 
 {$include LibOptions.inc}
@@ -87,10 +164,14 @@ uses
   Types,
   Windows,
   CommDlg,
-  Controls,
-  Dialogs;
+  Controls;
 
 type
+  TPrintRange = (prAllPages, prSelection, prPageNums);
+  TPrintDialogOption = (poPrintToFile, poPageNums, poSelection, poWarning, poHelp, poDisablePrintToFile);
+  TPrintDialogOptions = set of TPrintDialogOption;
+
+
   // Same as TPrintDialog(Ex), but:
   // * Cannot be placed on a Form at design time.
   // * Does not depend on a specific Delphi printer wrapper.
@@ -103,8 +184,8 @@ type
   TPrintDialog2 = class
   strict private
 	FTitle: string;
-	FOptions: Dialogs.TPrintDialogOptions;
-	FPrintRange: Dialogs.TPrintRange;
+	FOptions: TPrintDialogOptions;
+	FPrintRange: TPrintRange;
 
 	FDevMode: Windows.PDeviceMode;
 	FData: CommDlg.TPrintDlg;
@@ -139,7 +220,7 @@ type
 	property MaxPage: uint16 read FData.nMaxPage write FData.nMaxPage;
 	property Options: TPrintDialogOptions read FOptions write FOptions;
 	property PrintToFile: boolean read GetPrintToFile;
-	property PrintRange: TPrintRange read FPrintRange write FPrintRange default prAllPages;
+	property PrintRange: TPrintRange read FPrintRange write FPrintRange;
 	property DlgTemplate: PChar read FData.lpPrintTemplateName write FData.lpPrintTemplateName;
 	property DlgTemplateModule: HINST read FData.hInstance write FData.hInstance;
 	property Title: string read FTitle write FTitle;
@@ -390,15 +471,15 @@ begin
   // "If this flag is not set, DEVMODE.dmCopies always returns 1, and DEVMODE.dmCollate is always zero."
 
   Flags := PrintRanges[FPrintRange] or PD_ENABLEPRINTHOOK;
-  if not (poPrintToFile in FOptions) then Inc(Flags, PD_HIDEPRINTTOFILE);
-  if not (poPageNums in FOptions) then Inc(Flags, PD_NOPAGENUMS);
-  if not (poSelection in FOptions) then Inc(Flags, PD_NOSELECTION);
-  if poDisablePrintToFile in FOptions then Inc(Flags, PD_DISABLEPRINTTOFILE);
-  if poHelp in FOptions then Inc(Flags, PD_SHOWHELP);
-  if not (poWarning in FOptions) then Inc(Flags, PD_NOWARNING);
-  if FData.lpPrintTemplateName <> nil then inc(Flags, PD_ENABLEPRINTTEMPLATE);
+  if not (poPrintToFile in FOptions) then Flags := Flags or PD_HIDEPRINTTOFILE;
+  if not (poPageNums in FOptions) then Flags := Flags or PD_NOPAGENUMS;
+  if not (poSelection in FOptions) then Flags := Flags or PD_NOSELECTION;
+  if poDisablePrintToFile in FOptions then Flags := Flags or PD_DISABLEPRINTTOFILE;
+  if poHelp in FOptions then Flags := Flags or PD_SHOWHELP;
+  if not (poWarning in FOptions) then Flags := Flags or PD_NOWARNING;
+  if FData.lpPrintTemplateName <> nil then Flags := Flags or PD_ENABLEPRINTTEMPLATE;
 
-  FData.Flags := (FData.Flags and not PD_COLLATE) or Flags;
+  FData.Flags := (FData.Flags and (PD_COLLATE or PD_PRINTTOFILE)) or Flags;
 
   pointer(FData.lCustData) := self;
   FData.lpfnPrintHook := self.DialogHook;
@@ -429,7 +510,12 @@ begin
 
   if FData.Flags and PD_SELECTION <> 0 then FPrintRange := prSelection
   else if FData.Flags and PD_PAGENUMS <> 0 then FPrintRange := prPageNums
-  else FPrintRange := prAllPages;
+  else begin
+	FPrintRange := prAllPages;
+	// auto-update FromPage and ToPage to reflect this selection:
+	FData.nFromPage := FData.nMinPage;
+	FData.nToPage := FData.nMaxPage;
+  end;
 
   if not Result and (Err <> 0) then
 	raise Exception.CreateFmt('PrintDlg error %u', [Err]);
