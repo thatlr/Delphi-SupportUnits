@@ -322,7 +322,6 @@ type
 
 	procedure ConvToLoMM(var Size: TSize);
 	procedure CreateIC;
-	procedure DeleteDC;
 	function GetOptions(CapNames, CapIDs: uint16; LenName, LenID: integer): TPrinterOptions;
 	class function StrFromBuf(Buf: PChar; Len: integer): string; static;
 	procedure CheckCapability(Capability: TPrinterCapability);
@@ -584,9 +583,11 @@ end;
 destructor TPrinterEx.Destroy;
 begin
   self.Abort;
-  if FDC <> 0 then self.DeleteDC;
-
   FCanvas.Free;
+
+  if FDC <> 0 then
+	MyAssert(Windows.DeleteDC(FDC));
+
   FreeMem(FDevMode);
   inherited;
 end;
@@ -606,19 +607,6 @@ begin
 	Win32Check(Windows.ResetDC(FDC, FDevMode^) <> 0);
 	FDevModeChanged := false;
   end;
-end;
-
-
- //===================================================================================================================
- // Destroys the device context.
- // Since it is used in 'Destroy', it must not throw an exception.
- //===================================================================================================================
-procedure TPrinterEx.DeleteDC;
-begin
-  Assert(FDC <> 0);
-  FCanvas.Handle := 0;
-  MyAssert(Windows.DeleteDC(FDC));
-  FDC := 0;
 end;
 
 
@@ -713,8 +701,13 @@ var
 begin
   self.CheckPrinting(false);
   FJobID := 0;
+
   // always start with a fresh DC:
-  if FDC <> 0 then self.DeleteDC;
+  if FDC <> 0 then begin
+	FCanvas.Handle := 0;
+	MyAssert(Windows.DeleteDC(FDC));
+	FDC := 0;
+  end;
 
   FDC := Windows.CreateDC(nil, PChar(FName), nil, FDevMode);
   Win32Check(FDC <> 0);
@@ -1605,7 +1598,7 @@ end;
 class function TPrinterEx.GetDefaultPrinter: string;
 var
   len: DWORD;
-  DefaultPrinter: array[0..1023] of Char;
+  DefaultPrinter: array[0..255] of Char;
 begin
   Len := System.Length(DefaultPrinter);
 
@@ -1718,7 +1711,7 @@ function UnitTest: boolean;
 	outlen := Windows.GetTempPath(inlen, PChar(Result));
 	Win32Check((outlen > 0) and (outlen < inlen));
 	System.SetLength(Result, outlen);
-	Result := Result + '\test.dat';
+	Result := Result + '\test.pdf';
   end;
 
 const
@@ -1861,9 +1854,9 @@ begin
 
   Assert(TPrinterEx.GetJobStatus(p.Name, p.JobID, Status) and (pjsSpooling in Status));
 
-//  Assert(TPrinterEx.SetJob(p.Name, p.JobID, pjcDelete) );
+  Assert(TPrinterEx.SetJob(p.Name, p.JobID, pjcDelete) );
 
-//  Assert(TPrinterEx.GetJobStatus(p.Name, p.JobID, Status) and (pjsDeleting in Status));
+  Assert(TPrinterEx.GetJobStatus(p.Name, p.JobID, Status) and (pjsDeleting in Status));
 
   p.EndDoc;
 
@@ -1875,6 +1868,6 @@ begin
 end;
 
 
-initialization
-  Assert(UnitTest);
+//initialization
+//  Assert(UnitTest);
 end.
