@@ -116,7 +116,7 @@ unit PrintersEx;
   the start of a print job before each page instead of only at the real start of the print job. To prevent this, the
   property OptimizeResetDC of TPrinterEx should be set.
 
-  There are printer drivers that do not correctly implement world transformation, specifically the rotation by 90° or 270°
+  There are printer drivers that do not correctly implement world transformation, specifically the rotation by 90Â° or 270Â°
   in BitBlt(), StretchBlt() and similar GDI calls. The observed effect is a shift of the bitmap by one pixel in both X and
   Y directions: The bitmap is shifted by one pixel, one row and one column of the bitmap disappears and a black row/column
   of one pixel is drawn on the other side of the bitmap.
@@ -453,9 +453,19 @@ begin
   raise EArgumentOutOfRangeException.Create('Value out of range');
 end;
 
+procedure ChkGdiErr(Cond: boolean);
+begin
+  if not Cond then RaiseError('GDI or printer driver error');
+end;
+
+procedure RaiseOSError(Err: DWORD);
+begin
+  RaiseError(SysUtils.SysErrorMessage(Err));
+end;
+
 procedure Win32Check(Cond: boolean);
 begin
-  if not Cond then RaiseError(SysErrorMessage(Windows.GetLastError));
+  if not Cond then RaiseOSError(Windows.GetLastError);
 end;
 
  // In contrast to Assert(), the code for calculating the argument is not removed in RELEASE mode.
@@ -498,6 +508,8 @@ constructor TPrinterCanvas.Create(Printer: TPrinterEx);
 begin
   inherited Create;
   FPrinter := Printer;
+  // this value only changes afterwards if the application explicitly changes it:
+  self.Font.PixelsPerInch := FPrinter.UnitsPerInch;
 end;
 
 
@@ -510,9 +522,6 @@ procedure TPrinterCanvas.CreateHandle;
 begin
   Assert(FPrinter.DC <> 0);
   Assert(not self.HandleAllocated);
-  // .Font is not selected into the DC, so modifying Font.Height does not affect this TCanvas. It only causes the font
-  // object to refer to a different shared font resource.
-  self.UpdateFont;
   self.Handle := FPrinter.DC;
 end;
 
@@ -530,7 +539,7 @@ end;
 
 
  //===================================================================================================================
- // Adjust the font object to honor FPrinter.UnitsPerInch.
+ // Force Font.PixelsPerInch to match the Y resolution of the printer.
  //===================================================================================================================
 procedure TPrinterCanvas.UpdateFont;
 begin
@@ -561,7 +570,7 @@ end;
 
  //===================================================================================================================
  // <Name> may be the name of a local printer or the UNC name of a shared printer in the form \\server\printername.
- // For an invalid name, an EOSError exception with ERROR_INVALID_PRINTER_NAME is raised.
+ // For an invalid name, an EPrinter exception is raised.
  //===================================================================================================================
 constructor TPrinterEx.Create(const Name: string);
 begin
@@ -572,7 +581,7 @@ begin
   self.SetDevMode(nil);
   Assert(FDevMode <> nil);
 
-  // initially, we are in MM_TEXT:
+  // create the Canvas object and adjust Canvas.Font.PixelsPerInch:
   FUnitsPerInch := self.GetDPI.cy;
   FCanvas := TPrinterCanvas.Create(self);
 end;
@@ -600,11 +609,11 @@ procedure TPrinterEx.CreateIC;
 begin
   if FDC = 0 then begin
 	FDC := Windows.CreateIC(nil, PChar(FName), nil, FDevMode);
-	Win32Check(FDC <> 0);
+	ChkGdiErr(FDC <> 0);
 	FDevModeChanged := false;
   end
   else if FDevModeChanged and not FPrinting then begin
-	Win32Check(Windows.ResetDC(FDC, FDevMode^) <> 0);
+	ChkGdiErr(Windows.ResetDC(FDC, FDevMode^) <> 0);
 	FDevModeChanged := false;
   end;
 end;
@@ -625,20 +634,20 @@ begin
   self.CheckPrinting(true);
 
   // only GM_ADVANCED supports font scaling for both the X and Y axes independently (see note below):
-  Win32Check(Windows.SetGraphicsMode(FDC, GM_ADVANCED) <> 0);
-  Win32Check(Windows.SetMapMode(FDC, MapMode) <> 0);
+  ChkGdiErr(Windows.SetGraphicsMode(FDC, GM_ADVANCED) <> 0);
+  ChkGdiErr(Windows.SetMapMode(FDC, MapMode) <> 0);
 
   if MapMode <> MM_TEXT then begin
 	// read the viewport and window extent set be <MapMode>:
-	Win32Check(Windows.GetWindowExtEx(FDC, w));
-	Win32Check(Windows.GetViewPortExtEx(FDC, v));
+	ChkGdiErr(Windows.GetWindowExtEx(FDC, w));
+	ChkGdiErr(Windows.GetViewPortExtEx(FDC, v));
 
 	// Note: At this pount, you could modify <w> to scale one or both axis.
 
 	// re-adjust the Y axis orientation back to top-down, as in MM_TEXT:
-	Win32Check(Windows.SetMapMode(FDC, MM_ANISOTROPIC) <> 0);
-	Win32Check(Windows.SetWindowExtEx(FDC, w.cx, w.cy, nil));
-	Win32Check(Windows.SetViewPortExtEx(FDC, v.cx, -v.cy, nil));
+	ChkGdiErr(Windows.SetMapMode(FDC, MM_ANISOTROPIC) <> 0);
+	ChkGdiErr(Windows.SetWindowExtEx(FDC, w.cx, w.cy, nil));
+	ChkGdiErr(Windows.SetViewPortExtEx(FDC, v.cx, -v.cy, nil));
   end;
 
   case MapMode of
@@ -658,9 +667,7 @@ begin
 	// map the Canvas coordinate (0,0) to the upper left corner of the printable area:
 	Windows.SetViewportOrgEx(FDC, 0, 0, nil);
 
-  // Force FCanvas.Font.PixelsPerInch to match FUnitsPerInch.
-  // TCanvas.Font.PixelsPerInch is used when a font is assigned to the canvas: If source and target font have different
-  // PixelsPerInch values, then the .Height of the assigned font is converted accordingly.
+  // force FCanvas.Font.PixelsPerInch to match FUnitsPerInch:
   TPrinterCanvas(FCanvas).UpdateFont;
 end;
 
@@ -690,7 +697,7 @@ end;
  // Starts a print job <JobName> at the printer, optionally redirecting the output to <OutputFilename>.
  // If the printer opens some dialog at this point (for example, 'Microsoft Print to PDF' will do this) and this
  // dialog is cancelled by the user, false is returned.
- // Throws an EOSError exception if Windows cannot create a print job for whatever reason.
+ // Throws an EPrinter exception if Windows cannot create a print job for whatever reason.
  //===================================================================================================================
 function TPrinterEx.BeginDoc(const JobName: string; const OutputFilename: string = ''): boolean;
 var
@@ -710,7 +717,7 @@ begin
   end;
 
   FDC := Windows.CreateDC(nil, PChar(FName), nil, FDevMode);
-  Win32Check(FDC <> 0);
+  ChkGdiErr(FDC <> 0);
   FDevModeChanged := false;
 
   // The file-selection dialog of "Microsoft Print to PDF" selects a wrong window as its owner (it uses the *owner* of
@@ -756,7 +763,7 @@ begin
 
   FPageNumber := 1;
 
-  Win32Check(Windows.StartPage(FDC) > 0);
+  ChkGdiErr(Windows.StartPage(FDC) > 0);
   Result := true;
 end;
 
@@ -778,7 +785,7 @@ end;
  //===================================================================================================================
  // Finishes the last page and also the printjob. Returns false, if the Windows print job was cancelled by some action
  // outside of this object.
- // After this call, the job is definitely finished (Printing = false). If an error occurred during the call, an EOSError
+ // After this call, the job is definitely finished (Printing = false). If an error occurred during the call, an EPrinter
  // exception is thrown and the job is automatically aborted.
  //===================================================================================================================
 function TPrinterEx.EndDoc: boolean;
@@ -794,7 +801,7 @@ begin
 	  exit(false);
 	end;
 
-	Win32Check(Windows.EndDoc(FDC) > 0);
+	ChkGdiErr(Windows.EndDoc(FDC) > 0);
 
   except
 	self.Abort;
@@ -850,15 +857,16 @@ begin
 	// (SetGraphicsMode):
 	// According to https://referencesource.microsoft.com/#System.Drawing/commonui/System/Drawing/Printing/DefaultPrintController.cs
 	// and the docs, ResetDC() always returns the same handle as given.
-	Win32Check(Windows.ResetDC(FDC, FDevMode^) <> 0);
+	ChkGdiErr(Windows.ResetDC(FDC, FDevMode^) <> 0);
 	FDevModeChanged := false;
 
 	// ResetDC might have altered the page orientation, and therefore the DPI of the Y axis:
 	FUnitsPerInch := self.GetDPI.cy;
+	// force FCanvas.Font.PixelsPerInch to match FUnitsPerInch:
 	TPrinterCanvas(FCanvas).UpdateFont;
   end;
 
-  Win32Check(Windows.StartPage(FDC) > 0);
+  ChkGdiErr(Windows.StartPage(FDC) > 0);
   Inc(FPageNumber);
 
   FCanvas.MoveTo(0, 0);
@@ -896,7 +904,7 @@ begin
 	  // means printer is not accessible (wrong name, no access rights, deleted meanwhile):
 	  Err := Windows.GetLastError;
 	  if Err = ERROR_INVALID_HANDLE then Err := ERROR_INVALID_PRINTER_NAME;
-	  RaiseLastOSError(integer(Err));
+	  RaiseOSError(Err);
 	end;
 
 	GetMem(FDevMode, Size);
@@ -933,7 +941,7 @@ begin
 
   if Value <> nil then begin
 	// basic validation of the given DEVMODE structure:
-	Win32Check(_IsValidDevmode(Value, Value.dmSize + Value.dmDriverExtra));
+	ChkGdiErr(_IsValidDevmode(Value, Value.dmSize + Value.dmDriverExtra));
 	// merge settings from <Value> with the current settings in FDevMode:
 	Win32Check(WinSpool.DocumentProperties(0, 0, PChar(FName), FDevMode, Value, DM_IN_BUFFER or DM_OUT_BUFFER) >= 0);
 	FDevModeChanged := true;
@@ -1055,7 +1063,7 @@ end;
 
 
  //===================================================================================================================
- // Property Orientation: In landscape mode, the printer driver rotates the output by 90° or 270°. Due to this, the
+ // Property Orientation: In landscape mode, the printer driver rotates the output by 90Â° or 270Â°. Due to this, the
  // application must take into account that the page dimensions are swapped (Width <=> Height).
  //===================================================================================================================
 function TPrinterEx.GetOrientation: TPrinterOrientation;
@@ -1070,7 +1078,7 @@ end;
 
 
  //===================================================================================================================
- // Property Orientation: In landscape mode, the printer driver rotates the output by 90° or 270°. Due to this, the
+ // Property Orientation: In landscape mode, the printer driver rotates the output by 90Â° or 270Â°. Due to this, the
  // application must take into account that the page dimensions are swapped (Width <=> Height).
  //===================================================================================================================
 procedure TPrinterEx.SetOrientation(Value: TPrinterOrientation);
@@ -1159,7 +1167,7 @@ end;
  //===================================================================================================================
  // Returns all paper formats supported by the printer, or the paper bin currently selected.
  // Returns an empty list if the printer has no concept of "paper formats".
- // The sizes are reported in 0.1 mm units, for orientation "Portrait" (0° rotation of the output).
+ // The sizes are reported in 0.1 mm units, for orientation "Portrait" (0Â° rotation of the output).
  //===================================================================================================================
 function TPrinterEx.GetPaperSizes: TPrinterPaperSizes;
 const
@@ -1186,7 +1194,7 @@ begin
 	exit(nil);
 
   System.SetLength(Names, Count);
-  Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERNAMES, pointer(Names), FDevMode) >= 0);
+  ChkGdiErr(WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERNAMES, pointer(Names), FDevMode) >= 0);
 
   //
   // Retrieve the IDs:
@@ -1197,7 +1205,7 @@ begin
 	RaiseError('DeviceCapabilities() returned wrong value');
 
   System.SetLength(IDs, Count);
-  Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERS, pointer(IDs), FDevMode) >= 0);
+  ChkGdiErr(WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERS, pointer(IDs), FDevMode) >= 0);
 
   //
   // Retrieve the sizes of the paper formats:
@@ -1208,7 +1216,7 @@ begin
 	RaiseError('DeviceCapabilities() returned wrong value');
 
   System.SetLength(Sizes, Count);
-  Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERSIZE, pointer(Sizes), FDevMode) >= 0);
+  ChkGdiErr(WinSpool.DeviceCapabilities(pointer(FName), nil, DC_PAPERSIZE, pointer(Sizes), FDevMode) >= 0);
 
   // build the Result array:
 
@@ -1501,7 +1509,7 @@ begin
 	exit(nil);
 
   System.SetLength(Names, Count * LenName);
-  Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, CapNames, pointer(Names), FDevMode) >= 0);
+  ChkGdiErr(WinSpool.DeviceCapabilities(pointer(FName), nil, CapNames, pointer(Names), FDevMode) >= 0);
 
   //
   // Retrieve the IDs:
@@ -1512,7 +1520,7 @@ begin
 	RaiseError('DeviceCapabilities() returned wrong value');
 
   System.SetLength(IDs, Count * LenID);
-  Win32Check(WinSpool.DeviceCapabilities(pointer(FName), nil, CapIDs, pointer(IDs), FDevMode) >= 0);
+  ChkGdiErr(WinSpool.DeviceCapabilities(pointer(FName), nil, CapIDs, pointer(IDs), FDevMode) >= 0);
 
   // combine names and IDs in the result:
 
