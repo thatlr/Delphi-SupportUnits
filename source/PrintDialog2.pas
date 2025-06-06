@@ -183,6 +183,7 @@ type
   // this settings).
   TPrintDialog2 = class
   strict private
+	FPrinterName: string;
 	FTitle: string;
 	FOptions: TPrintDialogOptions;
 	FPrintRange: TPrintRange;
@@ -195,8 +196,6 @@ type
 	class function DialogHook(Wnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): UINT_PTR; stdcall; static;
 
 	// property support:
-	function GetPrinterName: string;
-	procedure SetPrinterName(const Value: string);
 	function GetCollate: boolean; inline;
 	procedure SetCollate(Value: boolean);
 	function GetPrintToFile: boolean; inline;
@@ -208,7 +207,7 @@ type
 	function ExecuteInThread(ParentWnd: HWND): boolean;
 	function Execute(Parent: TControl): boolean;
 
-	property PrinterName: string read GetPrinterName write SetPrinterName;
+	property PrinterName: string read FPrinterName write FPrinterName;
 	property PrinterCfg: TByteDynArray read GetPrinterCfg write SetPrinterCfg;
 	property DevMode: PDeviceMode read FDevMode write SetDevMode;
 
@@ -255,7 +254,6 @@ end;
  //===================================================================================================================
 destructor TPrintDialog2.Destroy;
 begin
-  self.FreeGlobal(FData.hDevNames);
   self.FreeDevMode;
   inherited;
 end;
@@ -329,57 +327,6 @@ end;
 
 
  //===================================================================================================================
- // Property PrinterName: Returns the name of the printer the user selected in the dialog.
- //===================================================================================================================
-function TPrintDialog2.GetPrinterName: string;
-var
-  DevNames: PDevNames;
-begin
-  if FData.hDevNames = 0 then
-	exit('');
-
-  DevNames := PDevNames(Windows.GlobalLock(FData.hDevNames));
-  try
-	Result := PChar(DevNames) + DevNames.wDeviceOffset;
-  finally
-	Windows.GlobalUnlock(FData.hDevNames);
-  end;
-end;
-
-
- //===================================================================================================================
- // Property PrinterName: Set the name of the printer pre-selected in the dialog. If an invalid name is given, the
- // dialog replaces it with the user's default printer when the dialog is shown.
- // Note: You must set .PrinterName always before .DevMode.
- //===================================================================================================================
-procedure TPrintDialog2.SetPrinterName(const Value: string);
-var
-  DevNames: PDevNames;
-  Len: uint32;
-begin
-  self.FreeGlobal(FData.hDevNames);
-
-  Len := System.Length(Value);
-
-  FData.hDevNames := Windows.GlobalAlloc(GMEM_MOVEABLE or GMEM_ZEROINIT, sizeof(TDevNames) + (Len + 1) * sizeof(Char));
-  Win32Check(FData.hDevNames <> 0);
-
-  DevNames := Windows.GlobalLock(FData.hDevNames);
-  try
-	// Ptr to PrinterName + #0
-	DevNames.wDeviceOffset := sizeof(TDevnames) div sizeof(char);
-	// Ptr to #0:
-	DevNames.wDriverOffset := DevNames.wDeviceOffset + Len;
-	// Ptr to #0:
-	DevNames.wOutputOffset := DevNames.wDriverOffset;
-	System.Move(PChar(Value)^, PChar(DevNames)[DevNames.wDeviceOffset], Len * sizeof(char));
-  finally
-	Windows.GlobalUnlock(FData.hDevNames);
-  end;
-end;
-
-
- //===================================================================================================================
  // Property Collate: Returns the current value from the dialog.
  //===================================================================================================================
 function TPrintDialog2.GetCollate: boolean;
@@ -413,48 +360,77 @@ end;
  //===================================================================================================================
 function TPrintDialog2.ExecuteInThread(ParentWnd: HWND): Boolean;
 
-  // moves memory block from FDevMode to FData.hDevMode:
-  procedure _WrapDevMode;
+  // create memory blocks for FData.hDevMode and for FData.hDevNames
+  procedure _WrapHandles;
   var
 	Size: DWORD;
 	tmp: PDeviceMode;
+	DevNames: PDevNames;
   begin
 	Assert(FData.hDevMode = 0);
+	Assert(FData.hDevNames = 0);
 
-	if FDevMode = nil then exit;
+	if FDevMode <> nil then begin
 
-	Size := FDevMode.dmSize + FDevMode.dmDriverExtra;
+	  Size := FDevMode.dmSize + FDevMode.dmDriverExtra;
 
-	FData.hDevMode := Windows.GlobalAlloc(GMEM_MOVEABLE, Size);
-	Win32Check(FData.hDevMode <> 0);
+	  FData.hDevMode := Windows.GlobalAlloc(GMEM_MOVEABLE, Size);
+	  Win32Check(FData.hDevMode <> 0);
 
-	tmp := Windows.GlobalLock(FData.hDevMode);
-	try
-	  System.Move(FDevMode^, tmp^, Size);
-	finally
-	  Windows.GlobalUnlock(FData.hDevMode);
+	  tmp := Windows.GlobalLock(FData.hDevMode);
+	  try
+		System.Move(FDevMode^, tmp^, Size);
+	  finally
+		Windows.GlobalUnlock(FData.hDevMode);
+	  end;
+
 	end;
 
-	self.FreeDevMode;
+	Size := System.Length(FPrinterName);
+
+	FData.hDevNames := Windows.GlobalAlloc(GMEM_MOVEABLE or GMEM_ZEROINIT, sizeof(TDevNames) + (Size + 1) * sizeof(Char));
+	Win32Check(FData.hDevNames <> 0);
+
+	DevNames := Windows.GlobalLock(FData.hDevNames);
+	try
+	  // Ptr to PrinterName + #0
+	  DevNames.wDeviceOffset := sizeof(TDevnames) div sizeof(char);
+	  // Ptr to #0:
+	  DevNames.wDriverOffset := DevNames.wDeviceOffset + Size;
+	  // Ptr to #0:
+	  DevNames.wOutputOffset := DevNames.wDriverOffset;
+	  System.Move(PChar(FPrinterName)^, PChar(DevNames)[DevNames.wDeviceOffset], Size * sizeof(char));
+	finally
+	  Windows.GlobalUnlock(FData.hDevNames);
+	end;
   end;
 
-  // moves memory block from FData.hDevMode to FDevMode:
-  procedure _UnwrapDevMode;
+  // extract content from FData.hDevMode and from FData.hDevNames
+  procedure _UnwrapHandles;
   var
 	tmp: PDeviceMode;
+	DevNames: PDevNames;
   begin
-	Assert(FDevMode = nil);
+	self.FreeDevMode;
+	FPrinterName := '';
 
-	if FData.hDevMode = 0 then exit;
-
-	tmp := Windows.GlobalLock(FData.hDevMode);
-	try
-	  FDevMode := DupMem(tmp, tmp.dmSize + tmp.dmDriverExtra);
-	finally
-	  Windows.GlobalUnlock(FData.hDevMode);
+	if FData.hDevMode <> 0 then begin
+	  tmp := Windows.GlobalLock(FData.hDevMode);
+	  try
+		FDevMode := DupMem(tmp, tmp.dmSize + tmp.dmDriverExtra);
+	  finally
+		Windows.GlobalUnlock(FData.hDevMode);
+	  end;
 	end;
 
-	self.FreeGlobal(FData.hDevMode);
+	if FData.hDevNames <> 0 then begin
+	  DevNames := PDevNames(Windows.GlobalLock(FData.hDevNames));
+	  try
+		FPrinterName := PChar(DevNames) + DevNames.wDeviceOffset;
+	  finally
+		Windows.GlobalUnlock(FData.hDevNames);
+	  end;
+	end;
   end;
 
 const
@@ -462,7 +438,9 @@ const
 var
   Flags: DWORD;
   Err: DWORD;
+  {$ifdef CPUX86}
   FPUControlWord: Word;
+  {$endif}
 begin
   FData.lStructSize := SizeOf(FData);
 
@@ -486,23 +464,38 @@ begin
   FData.hWndOwner := ParentWnd;
 
   // "Note that the values of hDevMode and hDevNames in PRINTDLG may change when they are passed into PrintDlg."
+  // FDevMode.dmDeviceName is limited to 32 chars, but hDevNames has no such limit.
+  // If an invalid name is given, the dialog replaces it with the user's default printer when the dialog is shown.
 
-  _WrapDevMode;
+  _WrapHandles;
+  {$ifdef CPUX86}
   asm
 	// Avoid FPU control word change
 	FNSTCW FPUControlWord
   end;
+  {$endif}
   try
 
-	Result := CommDlg.PrintDlg(FData);
-	Err := CommDlg.CommDlgExtendedError;
+	if not CommDlg.PrintDlg(FData) then begin
+	  // cancelled by user, or by some system error:
+	  Err := CommDlg.CommDlgExtendedError;
+	  if Err <> 0 then
+		raise Exception.CreateFmt('PrintDlg error %u', [Err]);
+	  exit(false);
+	end;
+
+	// read back the changed values:
+	_UnwrapHandles;
 
   finally
+	{$ifdef CPUX86}
 	asm
 	  FNCLEX
 	  FLDCW FPUControlWord
 	end;
-	_UnwrapDevMode;
+	{$endif}
+	self.FreeGlobal(FData.hDevNames);
+	self.FreeGlobal(FData.hDevMode);
   end;
 
   // FData.hDevNames:  "When PrintDlg returns, the DEVNAMES members contain information for the printer chosen by the user"
@@ -517,8 +510,7 @@ begin
 	FData.nToPage := FData.nMaxPage;
   end;
 
-  if not Result and (Err <> 0) then
-	raise Exception.CreateFmt('PrintDlg error %u', [Err]);
+  Result := true;
 end;
 
 
@@ -560,9 +552,9 @@ begin
 end;
 
 
-//===================================================================================================================
-// Executed before the dialog box is shown: Set the dialog's title and centers it before its parent window.
-//===================================================================================================================
+ //===================================================================================================================
+ // Executed before the dialog box is shown: Set the dialog's title and centers it before its parent window.
+ //===================================================================================================================
 class function TPrintDialog2.DialogHook(Wnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): UINT_PTR;
 
   // center the <hDialog> window before <hParent>
