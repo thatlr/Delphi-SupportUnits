@@ -23,7 +23,7 @@ type
   TTimeoutTime = record
   strict private
 	const
-	  FInfinite = uint64(High(int64));		// not cause overflow in the signed subtraction in RemainingMilliSecs (roughly 292m years)
+	  FInfinite = uint64(High(int64));
 	var
 	  FTimeoutTime: uint64;					// time when the timeout expires (in terms of GetTickCount64)
 
