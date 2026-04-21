@@ -716,8 +716,8 @@ var
 	tmp := VMT + vmtClassName;
 	if not _CanReadData(tmp, sizeof(pointer)) then exit(false);
 	tmp := PPointer(tmp)^;
-	// try to read the ClassName field itself:
-	if not _CanReadData(tmp, 2) or (tmp[0] = 0) or (tmp[1] <= 32) or (tmp[1] >= 126) or not _CanReadData(tmp, 1 + tmp^) then exit(false);
+	// try to read the ClassName field itself: first char must be a letter, including some UTF-8 lead byte for a letter like 'ä'
+	if not _CanReadData(tmp, 2) or (tmp[0] = 0) or (tmp[1] <= ord('A')) or not _CanReadData(tmp, 1 + tmp^) then exit(false);
 	ClassName := PShortString(tmp)^;
 	Result := true;
   end;
@@ -757,7 +757,8 @@ begin
   hFile := Windows.CreateFile(Filename, FILE_APPEND_DATA, FILE_SHARE_READ or FILE_SHARE_WRITE or FILE_SHARE_DELETE, nil, OPEN_ALWAYS, 0, 0);
   if hFile = INVALID_HANDLE_VALUE then exit;
 
-  WriteStrToFile(hFile, [FStats.Title, ' ', NUIntToStr(FStats.AllocMemSize), ' byte in ', NUIntToStr(FStats.AllocMemBlocks) , ' blocks', CrLf + CrLf]);
+  // write U+FEFF (BOM), as class names are UTF-8 encoded:
+  WriteStrToFile(hFile, [#$EF#$BB#$BF, FStats.Title, ' ', NUIntToStr(FStats.AllocMemSize), ' byte in ', NUIntToStr(FStats.AllocMemBlocks) , ' blocks', CrLf + CrLf]);
 
   if DoLock then FLock.AcquireShared;
 
